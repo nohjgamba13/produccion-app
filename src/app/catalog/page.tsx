@@ -7,15 +7,13 @@ type Role = "admin" | "supervisor" | "operator" | null;
 
 const PROFILES_TABLE = "profiles";
 const PRODUCTS_TABLE = "productos";
-
-// Bucket para imágenes del catálogo (debe existir en Storage)
 const PRODUCT_IMAGES_BUCKET = "product-images";
 
 type Product = {
   id: string;
   sku: string | null;
   name: string;
-  image_path: string; // URL pública
+  image_path: string;
   is_active: boolean;
   created_at?: string;
 
@@ -31,7 +29,16 @@ function isValidHttpUrl(u?: string | null) {
 
 function money(n?: number | null) {
   if (n === null || n === undefined || Number.isNaN(n)) return "-";
-  return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(n);
+  return new Intl.NumberFormat("es-CO", {
+    style: "currency",
+    currency: "COP",
+    maximumFractionDigits: 0,
+  }).format(n);
+}
+
+function normCat(c?: string | null) {
+  const v = (c ?? "").trim();
+  return v ? v : "Sin categoría";
 }
 
 export default function CatalogPage() {
@@ -46,20 +53,24 @@ export default function CatalogPage() {
   const [search, setSearch] = useState("");
   const [onlyActive, setOnlyActive] = useState(true);
 
+  // NUEVO: filtros por categoría + vista agrupada
+  const [categoryFilter, setCategoryFilter] = useState<string>("__all__");
+  const [groupByCategory, setGroupByCategory] = useState(true);
+
   // Form
   const [editingId, setEditingId] = useState<string | null>(null);
   const [sku, setSku] = useState("");
   const [name, setName] = useState("");
   const [category, setCategory] = useState("");
-  const [basePrice, setBasePrice] = useState<string>(""); // string para input
-  const [leadTimeDays, setLeadTimeDays] = useState<string>(""); // string para input
+  const [basePrice, setBasePrice] = useState<string>("");
+  const [leadTimeDays, setLeadTimeDays] = useState<string>("");
   const [techPdfUrl, setTechPdfUrl] = useState("");
 
   const [isActive, setIsActive] = useState(true);
   const [imageFile, setImageFile] = useState<File | null>(null);
-  const [imageUrl, setImageUrl] = useState(""); // URL guardada en DB
+  const [imageUrl, setImageUrl] = useState("");
 
-  const canEdit = role === "admin"; // catálogo lo controla admin
+  const canEdit = role === "admin";
 
   useEffect(() => {
     init();
@@ -80,7 +91,12 @@ export default function CatalogPage() {
         return;
       }
 
-      const pres = await supabase.from(PROFILES_TABLE).select("role").eq("user_id", u.id).single();
+      const pres = await supabase
+        .from(PROFILES_TABLE)
+        .select("role")
+        .eq("user_id", u.id)
+        .single();
+
       setRole((pres.data?.role ?? null) as Role);
 
       await loadProducts();
@@ -96,7 +112,9 @@ export default function CatalogPage() {
 
     const res = await supabase
       .from(PRODUCTS_TABLE)
-      .select("id, sku, name, image_path, is_active, created_at, category, base_price, lead_time_days, tech_pdf_url")
+      .select(
+        "id, sku, name, image_path, is_active, created_at, category, base_price, lead_time_days, tech_pdf_url"
+      )
       .order("created_at", { ascending: false });
 
     if (res.error) {
@@ -108,15 +126,39 @@ export default function CatalogPage() {
     setProducts((res.data ?? []) as Product[]);
   };
 
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of products) set.add(normCat(p.category));
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [products]);
+
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
     return products.filter((p) => {
       if (onlyActive && !p.is_active) return false;
+
+      const cat = normCat(p.category);
+      if (categoryFilter !== "__all__" && cat !== categoryFilter) return false;
+
       if (!s) return true;
       const hay = `${p.name} ${p.sku ?? ""} ${p.category ?? ""}`.toLowerCase();
       return hay.includes(s);
     });
-  }, [products, search, onlyActive]);
+  }, [products, search, onlyActive, categoryFilter]);
+
+  const grouped = useMemo(() => {
+    const map: Record<string, Product[]> = {};
+    for (const p of filtered) {
+      const cat = normCat(p.category);
+      if (!map[cat]) map[cat] = [];
+      map[cat].push(p);
+    }
+    // ordenar por categoría y nombre
+    for (const k of Object.keys(map)) {
+      map[k].sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return map;
+  }, [filtered]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -137,7 +179,9 @@ export default function CatalogPage() {
     setName(p.name ?? "");
     setCategory(p.category ?? "");
     setBasePrice(p.base_price !== null && p.base_price !== undefined ? String(p.base_price) : "");
-    setLeadTimeDays(p.lead_time_days !== null && p.lead_time_days !== undefined ? String(p.lead_time_days) : "");
+    setLeadTimeDays(
+      p.lead_time_days !== null && p.lead_time_days !== undefined ? String(p.lead_time_days) : ""
+    );
     setTechPdfUrl(p.tech_pdf_url ?? "");
     setIsActive(!!p.is_active);
     setImageUrl(p.image_path ?? "");
@@ -164,14 +208,12 @@ export default function CatalogPage() {
     if (!canEdit) return alert("Solo el ADMIN puede editar el catálogo.");
     if (!name.trim()) return alert("Falta el nombre del producto.");
 
-    // Foto obligatoria
     const isNew = !editingId;
     if (isNew && !imageFile) return alert("La foto del producto es obligatoria (selecciona una imagen).");
     if (!isNew && !imageFile && !isValidHttpUrl(imageUrl)) {
       return alert("La foto del producto es obligatoria (sube una imagen o conserva una URL válida).");
     }
 
-    // Validaciones numéricas suaves
     const bp = basePrice.trim() === "" ? null : Number(basePrice);
     if (bp !== null && (!isFinite(bp) || bp < 0)) return alert("Precio base inválido.");
 
@@ -237,6 +279,48 @@ export default function CatalogPage() {
       setSaving(false);
     }
   };
+
+  const ProductCard = ({ p }: { p: Product }) => (
+    <div key={p.id} className="border rounded-2xl overflow-hidden bg-white">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={p.image_path} alt={p.name} className="w-full h-36 object-cover border-b" />
+
+      <div className="p-3">
+        <div className="font-bold">{p.name}</div>
+        <div className="text-xs text-gray-600">SKU: {p.sku ?? "-"}</div>
+        <div className="text-xs text-gray-600">Categoría: {normCat(p.category)}</div>
+        <div className="text-xs text-gray-600">Precio base: {money(p.base_price)}</div>
+        <div className="text-xs text-gray-600">Días estimados: {p.lead_time_days ?? "-"}</div>
+
+        {p.tech_pdf_url ? (
+          <div className="mt-2">
+            <a className="text-sm underline" href={p.tech_pdf_url} target="_blank" rel="noreferrer">
+              Ver ficha técnica (PDF)
+            </a>
+          </div>
+        ) : (
+          <div className="text-xs text-gray-400 mt-2">Sin ficha técnica</div>
+        )}
+
+        <div className="mt-2 flex items-center justify-between">
+          <span className={`text-xs px-2 py-1 rounded-full ${p.is_active ? "bg-green-100" : "bg-gray-200"}`}>
+            {p.is_active ? "Activo" : "Inactivo"}
+          </span>
+
+          {canEdit && (
+            <div className="flex gap-2">
+              <button className="text-sm border px-3 py-1 rounded-xl disabled:opacity-50" onClick={() => startEdit(p)} disabled={saving}>
+                Editar
+              </button>
+              <button className="text-sm border px-3 py-1 rounded-xl disabled:opacity-50" onClick={() => toggleActive(p)} disabled={saving}>
+                {p.is_active ? "Desactivar" : "Activar"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 
   if (loading) return <div className="p-6">Cargando catálogo...</div>;
 
@@ -359,57 +443,66 @@ export default function CatalogPage() {
             <div className="flex flex-wrap gap-2 items-center justify-between">
               <div className="text-lg font-semibold">Productos</div>
 
-              <div className="flex gap-2 flex-wrap">
-                <input className="border p-2 rounded-xl" placeholder="Buscar por nombre, SKU o categoría" value={search} onChange={(e) => setSearch(e.target.value)} />
+              <div className="flex gap-2 flex-wrap items-center">
+                <input
+                  className="border p-2 rounded-xl"
+                  placeholder="Buscar por nombre, SKU o categoría"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
+
+                <select className="border p-2 rounded-xl" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+                  <option value="__all__">Todas las categorías</option>
+                  {categories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+
                 <label className="flex items-center gap-2 text-sm">
                   <input type="checkbox" checked={onlyActive} onChange={(e) => setOnlyActive(e.target.checked)} />
                   Solo activos
                 </label>
+
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={groupByCategory} onChange={(e) => setGroupByCategory(e.target.checked)} />
+                  Agrupar por categoría
+                </label>
               </div>
             </div>
 
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {filtered.map((p) => (
-                <div key={p.id} className="border rounded-2xl overflow-hidden">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={p.image_path} alt={p.name} className="w-full h-36 object-cover border-b" />
-
-                  <div className="p-3">
-                    <div className="font-bold">{p.name}</div>
-                    <div className="text-xs text-gray-600">SKU: {p.sku ?? "-"}</div>
-                    <div className="text-xs text-gray-600">Categoría: {p.category ?? "-"}</div>
-                    <div className="text-xs text-gray-600">Precio base: {money(p.base_price)}</div>
-                    <div className="text-xs text-gray-600">Días estimados: {p.lead_time_days ?? "-"}</div>
-
-                    {p.tech_pdf_url ? (
-                      <div className="mt-2">
-                        <a className="text-sm underline" href={p.tech_pdf_url} target="_blank" rel="noreferrer">
-                          Ver ficha técnica (PDF)
-                        </a>
-                      </div>
-                    ) : (
-                      <div className="text-xs text-gray-400 mt-2">Sin ficha técnica</div>
-                    )}
-
-                    <div className="mt-2 flex items-center justify-between">
-                      <span className={`text-xs px-2 py-1 rounded-full ${p.is_active ? "bg-green-100" : "bg-gray-200"}`}>
-                        {p.is_active ? "Activo" : "Inactivo"}
-                      </span>
-
-                      <div className="flex gap-2">
-                        <button className="text-sm border px-3 py-1 rounded-xl disabled:opacity-50" onClick={() => startEdit(p)} disabled={!canEdit || saving}>
-                          Editar
-                        </button>
-                        <button className="text-sm border px-3 py-1 rounded-xl disabled:opacity-50" onClick={() => toggleActive(p)} disabled={!canEdit || saving}>
-                          {p.is_active ? "Desactivar" : "Activar"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
+            {/* Vista */}
+            <div className="mt-4">
+              {!groupByCategory ? (
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {filtered.map((p) => (
+                    <ProductCard key={p.id} p={p} />
+                  ))}
+                  {filtered.length === 0 && <div className="text-sm text-gray-500">No hay productos con ese filtro.</div>}
                 </div>
-              ))}
+              ) : (
+                <div className="space-y-6">
+                  {Object.keys(grouped)
+                    .sort((a, b) => a.localeCompare(b))
+                    .map((cat) => (
+                      <div key={cat}>
+                        <div className="flex items-center justify-between">
+                          <h2 className="text-lg font-bold">{cat}</h2>
+                          <span className="text-xs px-2 py-1 rounded-full border bg-white">{grouped[cat].length}</span>
+                        </div>
 
-              {filtered.length === 0 && <div className="text-sm text-gray-500">No hay productos con ese filtro.</div>}
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          {grouped[cat].map((p) => (
+                            <ProductCard key={p.id} p={p} />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+
+                  {filtered.length === 0 && <div className="text-sm text-gray-500">No hay productos con ese filtro.</div>}
+                </div>
+              )}
             </div>
           </div>
         </div>
