@@ -14,7 +14,6 @@ const STAGES = ["venta", "diseno", "estampado", "confeccion", "revision_calidad"
 
 const getOrderType = (qty: number) => (qty >= 20 ? "produccion" : "venta");
 
-// ✅ enum típico
 const STAGE_STATUS = {
   PENDING: "pending",
   IN_PROGRESS: "in_progress",
@@ -28,7 +27,7 @@ type Product = {
   image_path: string | null;
   is_active: boolean;
 
-  category: string | null;
+  category: string | null; // ✅ obligatoria en catálogo
   base_price: number | null;
   lead_time_days: number | null;
 };
@@ -46,6 +45,11 @@ function money(n?: number | null) {
   return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(n);
 }
 
+function normCat(c?: string | null) {
+  const v = (c ?? "").trim();
+  return v ? v : "(Sin categoría)";
+}
+
 export default function NewOrderPage() {
   const [user, setUser] = useState<any>(null);
   const [role, setRole] = useState<Role>(null);
@@ -56,6 +60,7 @@ export default function NewOrderPage() {
 
   const [products, setProducts] = useState<Product[]>([]);
   const [searchProduct, setSearchProduct] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string>("__all__");
   const [selectedProductId, setSelectedProductId] = useState<string>("");
 
   const selectedProduct = useMemo(
@@ -63,19 +68,39 @@ export default function NewOrderPage() {
     [products, selectedProductId]
   );
 
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of products) {
+      if (!p.is_active) continue;
+      const c = normCat(p.category);
+      if (c !== "(Sin categoría)") set.add(c);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [products]);
+
   const filteredProducts = useMemo(() => {
     const s = searchProduct.trim().toLowerCase();
-    const base = products.filter((p) => p.is_active);
+    return products.filter((p) => {
+      if (!p.is_active) return false;
+      const c = normCat(p.category);
+      if (categoryFilter !== "__all__" && c !== categoryFilter) return false;
 
-    if (!s) return base.slice(0, 12);
-
-    const r = base.filter((p) => {
+      if (!s) return true;
       const hay = `${p.name} ${p.sku ?? ""} ${p.category ?? ""}`.toLowerCase();
       return hay.includes(s);
     });
+  }, [products, searchProduct, categoryFilter]);
 
-    return r.slice(0, 12);
-  }, [products, searchProduct]);
+  const groupedProducts = useMemo(() => {
+    const map: Record<string, Product[]> = {};
+    for (const p of filteredProducts) {
+      const c = normCat(p.category);
+      if (!map[c]) map[c] = [];
+      map[c].push(p);
+    }
+    for (const k of Object.keys(map)) map[k].sort((a, b) => a.name.localeCompare(b.name));
+    return map;
+  }, [filteredProducts]);
 
   const [clientName, setClientName] = useState("");
   const [quantity, setQuantity] = useState(1);
@@ -107,7 +132,6 @@ export default function NewOrderPage() {
       const r = (pres.data?.role ?? null) as Role;
       setRole(r);
 
-      // Crear orden: admin y supervisor (como venías)
       if (r !== "admin" && r !== "supervisor") {
         window.location.href = "/";
         return;
@@ -116,6 +140,7 @@ export default function NewOrderPage() {
       const res = await supabase
         .from(PRODUCTS_TABLE)
         .select("id, sku, name, image_path, is_active, category, base_price, lead_time_days")
+        .order("category", { ascending: true })
         .order("name", { ascending: true });
 
       if (res.error) throw res.error;
@@ -151,17 +176,23 @@ export default function NewOrderPage() {
     return `${prefix}${pad(num + 1)}`;
   };
 
+  const clearSelected = () => {
+    setSelectedProductId("");
+  };
+
   const createOrder = async () => {
     setErrorMsg("");
 
     if (!user?.id) return alert("No hay usuario autenticado.");
     if (!clientName.trim()) return alert("Falta cliente.");
     if (!selectedProduct) return alert("Selecciona un producto del catálogo.");
-    if (!selectedProduct.image_path) return alert("Este producto no tiene foto (es obligatoria).");
 
-    if (!isValidHttpUrl(selectedProduct.image_path)) {
-      return alert("La foto del producto debe ser una URL http(s).");
-    }
+    // Foto obligatoria
+    if (!selectedProduct.image_path) return alert("Este producto no tiene foto (es obligatoria).");
+    if (!isValidHttpUrl(selectedProduct.image_path)) return alert("La foto del producto debe ser una URL http(s).");
+
+    // Categoría obligatoria (por si quedó algún producto viejo sin categoría)
+    if (!selectedProduct.category || !selectedProduct.category.trim()) return alert("El producto no tiene categoría. Edita el catálogo.");
 
     const qty = Number(quantity);
     if (!qty || qty <= 0) return alert("Cantidad inválida.");
@@ -225,16 +256,11 @@ export default function NewOrderPage() {
     }
   };
 
-  const clearSelected = () => {
-    setSelectedProductId("");
-    setSearchProduct("");
-  };
-
   if (loading) return <div className="p-6">Cargando...</div>;
 
   return (
     <main className="min-h-screen bg-gray-100 p-4">
-      <div className="max-w-5xl mx-auto">
+      <div className="max-w-6xl mx-auto">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
             <h1 className="text-2xl font-bold">Crear Orden</h1>
@@ -254,7 +280,7 @@ export default function NewOrderPage() {
           </div>
         )}
 
-        <div className="mt-4 grid gap-4 md:grid-cols-[1fr_360px] items-start">
+        <div className="mt-4 grid gap-4 md:grid-cols-[1fr_420px] items-start">
           {/* Formulario */}
           <div className="bg-white border rounded-2xl p-4">
             <div className="grid gap-3">
@@ -299,39 +325,77 @@ export default function NewOrderPage() {
             </div>
           </div>
 
-          {/* Selector de producto */}
+          {/* Selector por categorías */}
           <div className="bg-white border rounded-2xl p-4">
-            <div className="text-lg font-semibold">Producto</div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-lg font-semibold">Producto</div>
+              {selectedProduct && (
+                <button className="text-sm underline" onClick={clearSelected} disabled={saving}>
+                  Cambiar
+                </button>
+              )}
+            </div>
 
             {!selectedProduct ? (
               <>
-                <input
-                  className="border p-3 rounded-xl w-full mt-3"
-                  placeholder="Buscar producto por nombre, SKU o categoría..."
-                  value={searchProduct}
-                  onChange={(e) => setSearchProduct(e.target.value)}
-                />
-
                 <div className="mt-3 grid gap-2">
-                  {filteredProducts.map((p) => (
-                    <button
-                      key={p.id}
-                      className="border rounded-xl p-2 text-left hover:bg-gray-50"
-                      onClick={() => {
-                        setSelectedProductId(p.id);
-                        setSearchProduct("");
-                      }}
-                    >
-                      <div className="font-semibold">{p.name}</div>
-                      <div className="text-xs text-gray-600">
-                        SKU: {p.sku ?? "-"} · Cat: {p.category ?? "-"} · {money(p.base_price)} · {p.lead_time_days ?? "-"} días
+                  <input
+                    className="border p-3 rounded-xl w-full"
+                    placeholder="Buscar por nombre, SKU o categoría..."
+                    value={searchProduct}
+                    onChange={(e) => setSearchProduct(e.target.value)}
+                  />
+
+                  <select
+                    className="border p-3 rounded-xl w-full"
+                    value={categoryFilter}
+                    onChange={(e) => setCategoryFilter(e.target.value)}
+                  >
+                    <option value="__all__">Todas las categorías</option>
+                    {categories.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="mt-3 space-y-5 max-h-[520px] overflow-auto pr-1">
+                  {Object.keys(groupedProducts)
+                    .sort((a, b) => a.localeCompare(b))
+                    .map((cat) => (
+                      <div key={cat}>
+                        <div className="flex items-center justify-between">
+                          <div className="font-bold">{cat}</div>
+                          <span className="text-xs px-2 py-1 rounded-full border bg-white">
+                            {groupedProducts[cat].length}
+                          </span>
+                        </div>
+
+                        <div className="mt-2 grid gap-2">
+                          {groupedProducts[cat].map((p) => (
+                            <button
+                              key={p.id}
+                              className="border rounded-xl p-2 text-left hover:bg-gray-50"
+                              onClick={() => setSelectedProductId(p.id)}
+                            >
+                              <div className="font-semibold">{p.name}</div>
+                              <div className="text-xs text-gray-600">
+                                SKU: {p.sku ?? "-"} · {money(p.base_price)} · {p.lead_time_days ?? "-"} días
+                              </div>
+                            </button>
+                          ))}
+                        </div>
                       </div>
-                    </button>
-                  ))}
+                    ))}
 
                   {filteredProducts.length === 0 && (
-                    <div className="text-sm text-gray-500">No hay productos con esa búsqueda.</div>
+                    <div className="text-sm text-gray-500">No hay productos con ese filtro.</div>
                   )}
+                </div>
+
+                <div className="text-xs text-gray-500 mt-3">
+                  * Solo se muestran productos <b>activos</b> y con foto.
                 </div>
               </>
             ) : (
@@ -346,10 +410,10 @@ export default function NewOrderPage() {
                 <div className="mt-3">
                   <div className="text-lg font-bold">{selectedProduct.name}</div>
                   <div className="text-sm text-gray-700">
-                    SKU: <b>{selectedProduct.sku ?? "-"}</b>
+                    Categoría: <b>{selectedProduct.category}</b>
                   </div>
                   <div className="text-sm text-gray-700">
-                    Categoría: <b>{selectedProduct.category ?? "-"}</b>
+                    SKU: <b>{selectedProduct.sku ?? "-"}</b>
                   </div>
                   <div className="text-sm text-gray-700">
                     Precio base: <b>{money(selectedProduct.base_price)}</b>
@@ -357,17 +421,9 @@ export default function NewOrderPage() {
                   <div className="text-sm text-gray-700">
                     Días estimados: <b>{selectedProduct.lead_time_days ?? "-"}</b>
                   </div>
-
-                  <button className="mt-3 border px-3 py-2 rounded-xl bg-white w-full" onClick={clearSelected} disabled={saving}>
-                    Cambiar producto
-                  </button>
                 </div>
               </div>
             )}
-
-            <div className="text-xs text-gray-500 mt-3">
-              * Solo se muestran productos <b>activos</b> y con foto obligatoria.
-            </div>
           </div>
         </div>
       </div>
