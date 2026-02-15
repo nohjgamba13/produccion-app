@@ -36,11 +36,6 @@ function money(n?: number | null) {
   }).format(n);
 }
 
-function normCat(c?: string | null) {
-  const v = (c ?? "").trim();
-  return v ? v : "Sin categoría";
-}
-
 export default function CatalogPage() {
   const [user, setUser] = useState<any>(null);
   const [role, setRole] = useState<Role>(null);
@@ -53,7 +48,6 @@ export default function CatalogPage() {
   const [search, setSearch] = useState("");
   const [onlyActive, setOnlyActive] = useState(true);
 
-  // NUEVO: filtros por categoría + vista agrupada
   const [categoryFilter, setCategoryFilter] = useState<string>("__all__");
   const [groupByCategory, setGroupByCategory] = useState(true);
 
@@ -61,7 +55,7 @@ export default function CatalogPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [sku, setSku] = useState("");
   const [name, setName] = useState("");
-  const [category, setCategory] = useState("");
+  const [category, setCategory] = useState(""); // ✅ ahora obligatoria
   const [basePrice, setBasePrice] = useState<string>("");
   const [leadTimeDays, setLeadTimeDays] = useState<string>("");
   const [techPdfUrl, setTechPdfUrl] = useState("");
@@ -91,12 +85,7 @@ export default function CatalogPage() {
         return;
       }
 
-      const pres = await supabase
-        .from(PROFILES_TABLE)
-        .select("role")
-        .eq("user_id", u.id)
-        .single();
-
+      const pres = await supabase.from(PROFILES_TABLE).select("role").eq("user_id", u.id).single();
       setRole((pres.data?.role ?? null) as Role);
 
       await loadProducts();
@@ -112,9 +101,7 @@ export default function CatalogPage() {
 
     const res = await supabase
       .from(PRODUCTS_TABLE)
-      .select(
-        "id, sku, name, image_path, is_active, created_at, category, base_price, lead_time_days, tech_pdf_url"
-      )
+      .select("id, sku, name, image_path, is_active, created_at, category, base_price, lead_time_days, tech_pdf_url")
       .order("created_at", { ascending: false });
 
     if (res.error) {
@@ -128,7 +115,10 @@ export default function CatalogPage() {
 
   const categories = useMemo(() => {
     const set = new Set<string>();
-    for (const p of products) set.add(normCat(p.category));
+    for (const p of products) {
+      const c = (p.category ?? "").trim();
+      if (c) set.add(c);
+    }
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [products]);
 
@@ -137,8 +127,10 @@ export default function CatalogPage() {
     return products.filter((p) => {
       if (onlyActive && !p.is_active) return false;
 
-      const cat = normCat(p.category);
-      if (categoryFilter !== "__all__" && cat !== categoryFilter) return false;
+      if (categoryFilter !== "__all__") {
+        const c = (p.category ?? "").trim();
+        if (c !== categoryFilter) return false;
+      }
 
       if (!s) return true;
       const hay = `${p.name} ${p.sku ?? ""} ${p.category ?? ""}`.toLowerCase();
@@ -149,11 +141,10 @@ export default function CatalogPage() {
   const grouped = useMemo(() => {
     const map: Record<string, Product[]> = {};
     for (const p of filtered) {
-      const cat = normCat(p.category);
-      if (!map[cat]) map[cat] = [];
-      map[cat].push(p);
+      const c = (p.category ?? "").trim() || "(Sin categoría)"; // debería no aparecer si ya obligamos al guardar
+      if (!map[c]) map[c] = [];
+      map[c].push(p);
     }
-    // ordenar por categoría y nombre
     for (const k of Object.keys(map)) {
       map[k].sort((a, b) => a.name.localeCompare(b.name));
     }
@@ -177,11 +168,9 @@ export default function CatalogPage() {
     setEditingId(p.id);
     setSku(p.sku ?? "");
     setName(p.name ?? "");
-    setCategory(p.category ?? "");
+    setCategory((p.category ?? "").trim());
     setBasePrice(p.base_price !== null && p.base_price !== undefined ? String(p.base_price) : "");
-    setLeadTimeDays(
-      p.lead_time_days !== null && p.lead_time_days !== undefined ? String(p.lead_time_days) : ""
-    );
+    setLeadTimeDays(p.lead_time_days !== null && p.lead_time_days !== undefined ? String(p.lead_time_days) : "");
     setTechPdfUrl(p.tech_pdf_url ?? "");
     setIsActive(!!p.is_active);
     setImageUrl(p.image_path ?? "");
@@ -207,6 +196,9 @@ export default function CatalogPage() {
 
     if (!canEdit) return alert("Solo el ADMIN puede editar el catálogo.");
     if (!name.trim()) return alert("Falta el nombre del producto.");
+
+    // ✅ Categoría obligatoria
+    if (!category.trim()) return alert("La categoría es obligatoria.");
 
     const isNew = !editingId;
     if (isNew && !imageFile) return alert("La foto del producto es obligatoria (selecciona una imagen).");
@@ -240,7 +232,7 @@ export default function CatalogPage() {
       const payload: any = {
         sku: sku.trim() ? sku.trim() : null,
         name: name.trim(),
-        category: category.trim() ? category.trim() : null,
+        category: category.trim(), // ✅ siempre
         base_price: bp,
         lead_time_days: ltd,
         tech_pdf_url: techPdfUrl.trim() ? techPdfUrl.trim() : null,
@@ -266,7 +258,7 @@ export default function CatalogPage() {
     }
   };
 
-  const toggleActive = async (p: Product) => {
+  const toggleActiveProd = async (p: Product) => {
     if (!canEdit) return alert("Solo ADMIN puede activar/desactivar.");
     setSaving(true);
     try {
@@ -288,7 +280,7 @@ export default function CatalogPage() {
       <div className="p-3">
         <div className="font-bold">{p.name}</div>
         <div className="text-xs text-gray-600">SKU: {p.sku ?? "-"}</div>
-        <div className="text-xs text-gray-600">Categoría: {normCat(p.category)}</div>
+        <div className="text-xs text-gray-600">Categoría: {(p.category ?? "").trim() || "-"}</div>
         <div className="text-xs text-gray-600">Precio base: {money(p.base_price)}</div>
         <div className="text-xs text-gray-600">Días estimados: {p.lead_time_days ?? "-"}</div>
 
@@ -312,7 +304,11 @@ export default function CatalogPage() {
               <button className="text-sm border px-3 py-1 rounded-xl disabled:opacity-50" onClick={() => startEdit(p)} disabled={saving}>
                 Editar
               </button>
-              <button className="text-sm border px-3 py-1 rounded-xl disabled:opacity-50" onClick={() => toggleActive(p)} disabled={saving}>
+              <button
+                className="text-sm border px-3 py-1 rounded-xl disabled:opacity-50"
+                onClick={() => toggleActiveProd(p)}
+                disabled={saving}
+              >
                 {p.is_active ? "Desactivar" : "Activar"}
               </button>
             </div>
@@ -380,9 +376,10 @@ export default function CatalogPage() {
                 disabled={!canEdit || saving}
               />
 
+              {/* ✅ Obligatoria */}
               <input
                 className="border p-3 rounded-xl w-full"
-                placeholder="Categoría (ej: Morrales, Camisetas...)"
+                placeholder="Categoría (OBLIGATORIA) ej: Morrales, Camisetas..."
                 value={category}
                 onChange={(e) => setCategory(e.target.value)}
                 disabled={!canEdit || saving}
@@ -472,7 +469,6 @@ export default function CatalogPage() {
               </div>
             </div>
 
-            {/* Vista */}
             <div className="mt-4">
               {!groupByCategory ? (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
