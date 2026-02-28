@@ -1,161 +1,92 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
 
-type Role = "admin" | "supervisor" | "operator" | null;
+type Role = "admin" | "supervisor" | "operator" | "operador" | null;
 
-export default function TopNav({
-  email,
-  role,
-}: {
-  email?: string | null;
-  role?: Role;
-}) {
-  const [open, setOpen] = useState(false);
+export default function TopNav() {
+  const [email, setEmail] = useState<string>("-");
+  const [role, setRole] = useState<Role>(null);
+  const [loading, setLoading] = useState(true);
 
-  const go = (path: string) => {
-    setOpen(false);
-    window.location.href = path;
-  };
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      const ures = await supabase.auth.getUser();
+      const u = ures.data.user;
 
-  const signOut = async () => {
-    await supabase.auth.signOut({ scope: "global" });
-    localStorage.clear();
-    sessionStorage.clear();
-    window.location.replace("/login");
+      if (!u) {
+        setEmail("-");
+        setRole(null);
+        setLoading(false);
+        return;
+      }
+
+      setEmail(u.email ?? "-");
+
+      const pres = await supabase.from("profiles").select("role").eq("user_id", u.id).single();
+      setRole((pres.data?.role ?? null) as Role);
+
+      setLoading(false);
+    })();
+  }, []);
+
+  const logout = async () => {
+    await supabase.auth.signOut();
+    window.location.href = "/login";
   };
 
   return (
-    <div className="bg-white border-b shadow-sm">
-      <div className="max-w-[1400px] mx-auto px-4 py-3 flex items-center justify-between gap-3">
-
-        {/* Logo / Nombre */}
+    <header className="w-full bg-white border-b">
+      <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3">
-          <div
-            className="font-bold text-lg cursor-pointer"
-            onClick={() => go("/")}
-          >
-            Producción
-          </div>
-
-          {/* Desktop menu */}
-          <div className="hidden md:flex items-center gap-2">
-            <button
-              className="px-3 py-2 rounded-xl hover:bg-gray-100"
-              onClick={() => go("/")}
-            >
-              Kanban
-            </button>
-
-            {(role === "admin" || role === "supervisor") && (
-              <button
-                className="px-3 py-2 rounded-xl hover:bg-gray-100"
-                onClick={() => go("/orders/new")}
-              >
-                + Crear orden
-              </button>
-            )}
-
-            <button
-              className="px-3 py-2 rounded-xl hover:bg-gray-100"
-              onClick={() => go("/catalog")}
-            >
-              Catálogo
-            </button>
-
-            {role === "admin" && (
-              <button
-                className="px-3 py-2 rounded-xl hover:bg-gray-100"
-                onClick={() => go("/admin/users")}
-              >
-                Usuarios
-              </button>
-            )}
-          </div>
+          <div className="font-bold">Producción</div>
+          <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+            {loading ? "Cargando..." : `Rol: ${role ?? "sin rol"}`}
+          </span>
         </div>
 
-        {/* Usuario + acciones */}
-        <div className="flex items-center gap-3">
-
-          {/* Desktop info */}
-          <div className="hidden md:block text-right">
-            <div className="text-sm font-semibold">
-              {email ?? "-"}
-            </div>
-            <div className="text-xs text-gray-600">
-              Rol: {role ?? "sin rol"}
-            </div>
-          </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-sm text-gray-700">{email}</span>
 
           <button
-            onClick={signOut}
-            className="hidden md:block border px-3 py-2 rounded-xl hover:bg-gray-100"
+            className="border px-3 py-2 rounded-xl bg-white hover:bg-gray-50"
+            onClick={() => (window.location.href = "/")}
           >
-            Cerrar sesión
+            Tablero
           </button>
 
-          {/* Mobile button */}
           <button
-            className="md:hidden border px-3 py-2 rounded-xl"
-            onClick={() => setOpen((v) => !v)}
-          >
-            ☰
-          </button>
-        </div>
-      </div>
-
-      {/* Mobile dropdown */}
-      {open && (
-        <div className="md:hidden border-t px-4 py-3 space-y-2 bg-white">
-          <div className="text-sm font-semibold">
-            {email ?? "-"}
-          </div>
-          <div className="text-xs text-gray-600 mb-2">
-            Rol: {role ?? "sin rol"}
-          </div>
-
-          <button
-            className="w-full text-left px-3 py-2 rounded-xl hover:bg-gray-100"
-            onClick={() => go("/")}
-          >
-            Kanban
-          </button>
-
-          {(role === "admin" || role === "supervisor") && (
-            <button
-              className="w-full text-left px-3 py-2 rounded-xl hover:bg-gray-100"
-              onClick={() => go("/orders/new")}
-            >
-              + Crear orden
-            </button>
-          )}
-
-          <button
-            className="w-full text-left px-3 py-2 rounded-xl hover:bg-gray-100"
-            onClick={() => go("/catalog")}
+            className="border px-3 py-2 rounded-xl bg-white hover:bg-gray-50"
+            onClick={() => (window.location.href = "/catalog")}
           >
             Catálogo
           </button>
 
           {role === "admin" && (
-            <button
-              className="w-full text-left px-3 py-2 rounded-xl hover:bg-gray-100"
-              onClick={() => go("/admin/users")}
-            >
-              Usuarios
-            </button>
+            <>
+              <button
+                className="border px-3 py-2 rounded-xl bg-white hover:bg-gray-50"
+                onClick={() => (window.location.href = "/admin/users")}
+              >
+                Usuarios
+              </button>
+
+              <button
+                className="border px-3 py-2 rounded-xl bg-white hover:bg-gray-50"
+                onClick={() => (window.location.href = "/admin/stages")}
+              >
+                Módulos
+              </button>
+            </>
           )}
 
-          <button
-            className="w-full text-left border px-3 py-2 rounded-xl"
-            onClick={signOut}
-          >
+          <button className="px-3 py-2 rounded-xl bg-black text-white" onClick={logout}>
             Cerrar sesión
           </button>
         </div>
-      )}
-    </div>
+      </div>
+    </header>
   );
 }
-
