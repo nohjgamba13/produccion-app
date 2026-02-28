@@ -4,22 +4,19 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { supabase } from "../../../lib/supabaseClient";
 
-type Role = "admin" | "supervisor" | "operator" | null;
+type Role = "admin" | "supervisor" | "operator" | "operador" | null;
 
-const ORDERS_TABLE = "ordenes_de_produccion";
-const STAGES_TABLE = "etapas_de_produccion";
 const PROFILES_TABLE = "profiles";
-const EVIDENCE_BUCKET = "evidences";
+const ORDERS_TABLE = "ordenes_de_produccion";
+const ITEMS_TABLE = "orden_items";
+const STAGES_TABLE = "etapas_de_produccion";
+
+const EVIDENCES_BUCKET = "evidences"; // si tu bucket se llama distinto, cámbialo aquí
 
 const STAGES = ["venta", "diseno", "estampado", "confeccion", "revision_calidad", "despacho"] as const;
+type StageKey = (typeof STAGES)[number];
 
-const STAGE_STATUS = {
-  PENDING: "pending",
-  IN_PROGRESS: "in_progress",
-  APPROVED: "approved",
-} as const;
-
-const STAGE_LABEL: Record<(typeof STAGES)[number], string> = {
+const STAGE_LABEL: Record<StageKey, string> = {
   venta: "Venta",
   diseno: "Diseño",
   estampado: "Estampado",
@@ -28,32 +25,97 @@ const STAGE_LABEL: Record<(typeof STAGES)[number], string> = {
   despacho: "Despacho",
 };
 
-const NEXT_STAGE: Record<string, string | null> = {
-  venta: "diseno",
-  diseno: "estampado",
-  estampado: "confeccion",
-  confeccion: "revision_calidad",
-  revision_calidad: "despacho",
-  despacho: null,
+const STAGE_STATUS = {
+  PENDING: "pending",
+  IN_PROGRESS: "in_progress",
+  APPROVED: "approved",
+} as const;
+
+type OrderRow = {
+  id: string;
+  display_code_manual: string | null;
+  order_type: string | null;
+  status: string | null;
+  current_stage: string | null;
+  client_name: string | null;
+  due_date: string | null;
+  created_at: string | null;
+  quantity: number | null;
 };
 
-function formatDate(iso?: string | null) {
+type OrderItemRow = {
+  id: number;
+  order_id: string;
+  product_id: string | null;
+  product_name: string;
+  product_image_path: string;
+  category: string;
+  sku: string | null;
+  qty: number;
+  lead_time_days: number;
+  created_at: string;
+};
+
+type StageRow = {
+  order_id: string;
+  stage: string;
+  status: string;
+  started_at: string | null;
+  approved_at: string | null;
+  evidence_url: string | null;
+  notes: string | null;
+};
+
+function fmtDate(iso?: string | null) {
   if (!iso) return "-";
   try {
-    return new Date(iso).toISOString().slice(0, 19).replace("T", " ");
+    return new Date(iso).toISOString().slice(0, 10);
   } catch {
     return String(iso);
   }
 }
 
-function isValidHttpUrl(u?: string | null) {
-  return !!u && /^https?:\/\//i.test(u);
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }
 
-type ProfileLite = {
-  user_id: string;
-  role: string;
-};
+function daysUntil(due?: string | null) {
+  if (!due) return null;
+  try {
+    const ms = new Date(due).getTime() - startOfToday();
+    return Math.floor(ms / (1000 * 60 * 60 * 24));
+  } catch {
+    return null;
+  }
+}
+
+function dueBadge(due?: string | null, status?: string | null) {
+  if ((status ?? "").toLowerCase() === "completed") return { label: "Completada", cls: "bg-green-100 text-green-800" };
+  const d = daysUntil(due);
+  if (d === null) return { label: "Sin fecha", cls: "bg-gray-100 text-gray-700" };
+  if (d < 0) return { label: "Vencida", cls: "bg-red-100 text-red-800" };
+  if (d <= 2) return { label: `Por vencer (${d}d)`, cls: "bg-orange-100 text-orange-800" };
+  if (d <= 5) return { label: `Próxima (${d}d)`, cls: "bg-yellow-100 text-yellow-800" };
+  return { label: `En tiempo (${d}d)`, cls: "bg-emerald-100 text-emerald-800" };
+}
+
+function isStageKey(v: any): v is StageKey {
+  return STAGES.includes(v);
+}
+
+function stageLabel(v?: string | null) {
+  if (!v) return "-";
+  return isStageKey(v) ? STAGE_LABEL[v] : v;
+}
+
+function nextStage(stage: string | null) {
+  const i = STAGES.findIndex((s) => s === stage);
+  if (i < 0) return null;
+  if (i === STAGES.length - 1) return null;
+  return STAGES[i + 1];
+}
 
 export default function OrderDetailPage() {
   const params = useParams<{ id: string }>();
@@ -61,21 +123,22 @@ export default function OrderDetailPage() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
 
   const [user, setUser] = useState<any>(null);
   const [role, setRole] = useState<Role>(null);
+  const [myStage, setMyStage] = useState<string | null>(null);
 
-  const [order, setOrder] = useState<any>(null);
-  const [stages, setStages] = useState<any[]>([]);
-  const [errorMsg, setErrorMsg] = useState<string>("");
-
-  const [people, setPeople] = useState<ProfileLite[]>([]);
+  const [order, setOrder] = useState<OrderRow | null>(null);
+  const [items, setItems] = useState<OrderItemRow[]>([]);
+  const [stages, setStages] = useState<StageRow[]>([]);
 
   const [uploadingStage, setUploadingStage] = useState<string | null>(null);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadNote, setUploadNote] = useState<string>("");
+  const [fileByStage, setFileByStage] = useState<Record<string, File | null>>({});
+  const [notesByStage, setNotesByStage] = useState<Record<string, string>>({});
 
-  const [qcChecked, setQcChecked] = useState(false);
+  const isOperator = role === "operator" || role === "operador";
+  const canSeeAll = role === "admin" || role === "supervisor";
 
   useEffect(() => {
     init();
@@ -83,12 +146,14 @@ export default function OrderDetailPage() {
   }, [orderId]);
 
   const init = async () => {
+    if (!orderId) return;
+
     setLoading(true);
     setErrorMsg("");
 
     try {
-      const userRes = await supabase.auth.getUser();
-      const u = userRes.data.user ?? null;
+      const ures = await supabase.auth.getUser();
+      const u = ures.data.user ?? null;
       setUser(u);
 
       if (!u) {
@@ -96,14 +161,18 @@ export default function OrderDetailPage() {
         return;
       }
 
-      const profRes = await supabase.from(PROFILES_TABLE).select("role").eq("user_id", u.id).single();
-      setRole((profRes.data?.role ?? null) as Role);
+      const pres = await supabase.from(PROFILES_TABLE).select("role").eq("user_id", u.id).single();
+      const r = (pres.data?.role ?? null) as Role;
+      setRole(r);
 
-      // lista de perfiles para asignación (mostramos user_id + role)
-      const pplRes = await supabase.from(PROFILES_TABLE).select("user_id, role").order("role", { ascending: true });
-      if (!pplRes.error) setPeople((pplRes.data ?? []) as ProfileLite[]);
+      if (r === "operator" || r === "operador") {
+        const st = await supabase.rpc("user_stage", { uid: u.id });
+        setMyStage((st.data ?? null) as string | null);
+      } else {
+        setMyStage(null);
+      }
 
-      await fetchOrder();
+      await loadAll(r, u.id);
     } catch (e: any) {
       setErrorMsg(e?.message ?? String(e));
     } finally {
@@ -111,419 +180,381 @@ export default function OrderDetailPage() {
     }
   };
 
-  const fetchOrder = async () => {
-    if (!orderId) return;
+  const loadAll = async (r?: Role, uid?: string) => {
+    setErrorMsg("");
 
-    const ordRes = await supabase
+    const o = await supabase
       .from(ORDERS_TABLE)
-      .select(
-        "id, display_code_manual, order_type, status, current_stage, product_id, product_name, product_image_path, quantity, client_name, created_at, due_date"
-      )
+      .select("id, display_code_manual, order_type, status, current_stage, client_name, due_date, created_at, quantity")
       .eq("id", orderId)
       .single();
 
-    if (ordRes.error) {
-      setErrorMsg("Error cargando orden: " + ordRes.error.message);
+    if (o.error) {
+      setErrorMsg("No pude cargar la orden: " + o.error.message);
       setOrder(null);
-      setStages([]);
       return;
     }
+    setOrder(o.data as OrderRow);
 
-    setOrder(ordRes.data);
+    const it = await supabase
+      .from(ITEMS_TABLE)
+      .select("id, order_id, product_id, product_name, product_image_path, category, sku, qty, lead_time_days, created_at")
+      .eq("order_id", orderId)
+      .order("category", { ascending: true })
+      .order("created_at", { ascending: true });
 
-    const stgRes = await supabase
+    if (it.error) {
+      setErrorMsg("No pude cargar items: " + it.error.message);
+      setItems([]);
+    } else {
+      setItems((it.data ?? []) as OrderItemRow[]);
+    }
+
+    const st = await supabase
       .from(STAGES_TABLE)
-      .select("id, order_id, stage, status, started_at, approved_at, evidence_url, notes, assigned_user_id, assigned_by, assigned_at")
+      .select("order_id, stage, status, started_at, approved_at, evidence_url, notes")
       .eq("order_id", orderId);
 
-    if (stgRes.error) {
-      setErrorMsg("Error cargando etapas: " + stgRes.error.message);
+    if (st.error) {
+      setErrorMsg("No pude cargar etapas: " + st.error.message);
       setStages([]);
-      return;
+    } else {
+      const rows = (st.data ?? []) as StageRow[];
+      rows.sort((a, b) => STAGES.indexOf(a.stage as any) - STAGES.indexOf(b.stage as any));
+      setStages(rows);
+
+      const map: Record<string, string> = {};
+      for (const s of rows) map[s.stage] = s.notes ?? "";
+      setNotesByStage(map);
     }
 
-    setStages(stgRes.data ?? []);
-
-    const qc = (stgRes.data ?? []).find((s: any) => s.stage === "revision_calidad");
-    setQcChecked(qc?.status === STAGE_STATUS.APPROVED);
+    if (r === "operator" || r === "operador") {
+      const stg = await supabase.rpc("user_stage", { uid });
+      const stage = (stg.data ?? null) as string | null;
+      setMyStage(stage);
+    }
   };
 
-  const stageMap = useMemo(() => {
-    const map: Record<string, any> = {};
-    for (const s of stages) map[s.stage] = s;
+  const itemsGrouped = useMemo(() => {
+    const map: Record<string, OrderItemRow[]> = {};
+    for (const it of items) {
+      const c = (it.category ?? "").trim() || "Sin categoría";
+      if (!map[c]) map[c] = [];
+      map[c].push(it);
+    }
     return map;
-  }, [stages]);
+  }, [items]);
 
-  const canApprove = role === "admin" || role === "supervisor";
-  const canWorkAsSupervisor = role === "admin" || role === "supervisor";
+  const visibleStages = useMemo(() => {
+    if (canSeeAll) return stages;
+    if (isOperator) return stages.filter((s) => s.stage === myStage);
+    return [];
+  }, [stages, canSeeAll, isOperator, myStage]);
 
-  const isStageActive = (stageKey: string) => {
-    const s = stageMap[stageKey];
-    if (!s) return order?.current_stage === stageKey && order?.status === "active";
-    return s.status === STAGE_STATUS.IN_PROGRESS;
-  };
-
-  const isStageApproved = (stageKey: string) => {
-    const s = stageMap[stageKey];
-    return s?.status === STAGE_STATUS.APPROVED;
-  };
-
-  const canOperatorWorkThisStage = (stageKey: string) => {
-    const s = stageMap[stageKey];
-    if (!s) return false;
+  const canApproveStage = async (stageName: string) => {
     if (!user?.id) return false;
-
-    // supervisor/admin siempre puede trabajar
-    if (canWorkAsSupervisor) return true;
-
-    // operario solo si está asignado a esa etapa
-    return role === "operator" && s.assigned_user_id === user.id;
+    const res = await supabase.rpc("can_approve_stage", { uid: user.id, st: stageName });
+    return !!res.data;
   };
 
-  const ensureStageRow = async (stageKey: string) => {
-    const existing = stageMap[stageKey];
-    if (existing) return existing;
-
-    const initialStatus =
-      order?.current_stage === stageKey && order?.status === "active" ? STAGE_STATUS.IN_PROGRESS : STAGE_STATUS.PENDING;
-
-    const ins = await supabase
-      .from(STAGES_TABLE)
-      .insert({
-        order_id: orderId,
-        stage: stageKey,
-        status: initialStatus,
-        started_at: initialStatus === STAGE_STATUS.IN_PROGRESS ? new Date().toISOString() : null,
-      })
-      .select("id, order_id, stage, status, started_at, approved_at, evidence_url, notes, assigned_user_id, assigned_by, assigned_at")
-      .single();
-
-    if (ins.error) throw ins.error;
-    return ins.data;
-  };
-
-  const activateStage = async (stageKey: string) => {
-    const s = await ensureStageRow(stageKey);
-    if (s.status === STAGE_STATUS.IN_PROGRESS || s.status === STAGE_STATUS.APPROVED) return;
-
-    const up = await supabase
-      .from(STAGES_TABLE)
-      .update({ status: STAGE_STATUS.IN_PROGRESS, started_at: new Date().toISOString() })
-      .eq("order_id", orderId)
-      .eq("stage", stageKey);
-
-    if (up.error) throw up.error;
-  };
-
-  const assignStage = async (stageKey: string, assigneeUserId: string | null) => {
-    if (!canWorkAsSupervisor) return alert("Solo admin/supervisor puede asignar operarios.");
-
-    setSaving(true);
+  const uploadEvidence = async (stageName: string) => {
     setErrorMsg("");
+    const file = fileByStage[stageName];
+    if (!file) return alert("Selecciona un archivo primero.");
+
+    setUploadingStage(stageName);
 
     try {
-      await ensureStageRow(stageKey);
+      const ext = file.name.split(".").pop() || "jpg";
+      const safe = `${orderId}/${stageName}-${Date.now()}.${ext}`;
 
-      const up = await supabase
-        .from(STAGES_TABLE)
-        .update({
-          assigned_user_id: assigneeUserId,
-          assigned_by: user?.id ?? null,
-          assigned_at: assigneeUserId ? new Date().toISOString() : null,
-        })
-        .eq("order_id", orderId)
-        .eq("stage", stageKey);
-
+      const up = await supabase.storage.from(EVIDENCES_BUCKET).upload(safe, file, { upsert: true });
       if (up.error) throw up.error;
 
-      await fetchOrder();
-    } catch (e: any) {
-      setErrorMsg(e?.message ?? String(e));
-      alert("Error asignando: " + (e?.message ?? String(e)));
-    } finally {
-      setSaving(false);
-    }
-  };
+      const pub = supabase.storage.from(EVIDENCES_BUCKET).getPublicUrl(safe);
+      const url = pub.data.publicUrl;
+      if (!url) throw new Error("No se pudo obtener URL pública del archivo.");
 
-  const approveStage = async (stageKey: string) => {
-    if (!order) return;
-    if (!canApprove) return alert("Solo supervisor/admin puede aprobar.");
-
-    if (stageKey === "revision_calidad" && !qcChecked) {
-      return alert("Marca 'Revisado y aprobado' para poder aprobar.");
-    }
-
-    setSaving(true);
-    setErrorMsg("");
-
-    try {
-      await ensureStageRow(stageKey);
-
-      const upStage = await supabase
+      const upd = await supabase
         .from(STAGES_TABLE)
-        .update({
-          status: STAGE_STATUS.APPROVED,
-          approved_at: new Date().toISOString(),
-          notes: stageKey === "revision_calidad" ? "QC: revisado y aprobado" : undefined,
-        })
+        .update({ evidence_url: url })
         .eq("order_id", orderId)
-        .eq("stage", stageKey);
+        .eq("stage", stageName);
 
-      if (upStage.error) throw upStage.error;
+      if (upd.error) throw upd.error;
 
-      const next = NEXT_STAGE[stageKey];
-
-      if (next) {
-        await activateStage(next);
-
-        const upOrder = await supabase.from(ORDERS_TABLE).update({ current_stage: next }).eq("id", orderId);
-        if (upOrder.error) throw upOrder.error;
-      } else {
-        const upOrder = await supabase.from(ORDERS_TABLE).update({ status: "completed", current_stage: "despacho" }).eq("id", orderId);
-        if (upOrder.error) throw upOrder.error;
-      }
-
-      await fetchOrder();
+      await loadAll(role, user?.id);
+      alert("✅ Evidencia subida.");
     } catch (e: any) {
-      console.error(e);
-      setErrorMsg(e?.message ?? String(e));
-      alert("Error aprobando etapa: " + (e?.message ?? String(e)));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const uploadEvidence = async () => {
-    if (!uploadingStage || !uploadFile || !orderId) return;
-    if (uploadingStage === "revision_calidad") return alert("En Revisión y calidad no se sube evidencia (solo check).");
-
-    // permiso para trabajar (operario asignado o supervisor/admin)
-    if (!canOperatorWorkThisStage(uploadingStage)) {
-      return alert("No tienes permiso para subir evidencia en esta etapa (no estás asignado).");
-    }
-
-    setSaving(true);
-    setErrorMsg("");
-
-    try {
-      await ensureStageRow(uploadingStage);
-
-      const ext = uploadFile.name.split(".").pop() || "bin";
-      const safeStage = String(uploadingStage).replace(/[^a-z0-9_]/gi, "_");
-      const filePath = `orders/${orderId}/${safeStage}/${Date.now()}.${ext}`;
-
-      const up = await supabase.storage.from(EVIDENCE_BUCKET).upload(filePath, uploadFile, { upsert: true });
-      if (up.error) throw up.error;
-
-      const pub = supabase.storage.from(EVIDENCE_BUCKET).getPublicUrl(filePath);
-      const publicUrl = pub.data.publicUrl;
-
-      const upStage = await supabase
-        .from(STAGES_TABLE)
-        .update({ evidence_url: publicUrl, notes: uploadNote || null })
-        .eq("order_id", orderId)
-        .eq("stage", uploadingStage);
-
-      if (upStage.error) throw upStage.error;
-
-      setUploadFile(null);
-      setUploadNote("");
-      setUploadingStage(null);
-
-      await fetchOrder();
-      alert("Evidencia subida ✅");
-    } catch (e: any) {
-      setErrorMsg(e?.message ?? String(e));
       alert("❌ Error subiendo evidencia: " + (e?.message ?? String(e)));
     } finally {
+      setUploadingStage(null);
+    }
+  };
+
+  const saveNotes = async (stageName: string) => {
+    setSaving(true);
+    try {
+      const upd = await supabase
+        .from(STAGES_TABLE)
+        .update({ notes: notesByStage[stageName] ?? "" })
+        .eq("order_id", orderId)
+        .eq("stage", stageName);
+
+      if (upd.error) throw upd.error;
+
+      await loadAll(role, user?.id);
+      alert("✅ Notas guardadas.");
+    } catch (e: any) {
+      alert("❌ Error guardando notas: " + (e?.message ?? String(e)));
+    } finally {
       setSaving(false);
     }
   };
 
-  const userLabel = (uid?: string | null) => {
-    if (!uid) return "Sin asignar";
-    const p = people.find((x) => x.user_id === uid);
-    const short = uid.slice(0, 8) + "…";
-    return p ? `${p.role} (${short})` : short;
+  const approve = async (stageName: string) => {
+    if (!order) return;
+
+    setErrorMsg("");
+    setSaving(true);
+
+    try {
+      const ok = await canApproveStage(stageName);
+      if (!ok) {
+        alert("No tienes permiso para aprobar esta etapa.");
+        return;
+      }
+
+      const now = new Date().toISOString();
+
+      const updStage = await supabase
+        .from(STAGES_TABLE)
+        .update({ status: STAGE_STATUS.APPROVED, approved_at: now })
+        .eq("order_id", orderId)
+        .eq("stage", stageName);
+
+      if (updStage.error) throw updStage.error;
+
+      const nxt = nextStage(stageName);
+      if (nxt) {
+        const updNext = await supabase
+          .from(STAGES_TABLE)
+          .update({ status: STAGE_STATUS.IN_PROGRESS, started_at: now })
+          .eq("order_id", orderId)
+          .eq("stage", nxt)
+          .eq("status", STAGE_STATUS.PENDING);
+
+        if (updNext.error) console.warn("No pude activar siguiente etapa:", updNext.error.message);
+
+        const updOrder = await supabase.from(ORDERS_TABLE).update({ current_stage: nxt }).eq("id", orderId);
+        if (updOrder.error) throw updOrder.error;
+      } else {
+        const updOrder = await supabase.from(ORDERS_TABLE).update({ status: "completed", current_stage: "despacho" }).eq("id", orderId);
+        if (updOrder.error) throw updOrder.error;
+      }
+
+      await loadAll(role, user?.id);
+      alert("✅ Etapa aprobada.");
+    } catch (e: any) {
+      alert("❌ Error aprobando: " + (e?.message ?? String(e)));
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const stageCard = (stageKey: (typeof STAGES)[number]) => {
-    const s = stageMap[stageKey];
-    const active = isStageActive(stageKey);
-    const approved = isStageApproved(stageKey);
-    const needsEvidence = stageKey !== "revision_calidad";
+  if (loading) return <div className="p-6">Cargando orden...</div>;
+  if (!order) return <div className="p-6">No se pudo cargar la orden.</div>;
 
-    const canWork = active && !approved && canOperatorWorkThisStage(stageKey);
-
-    return (
-      <div key={stageKey} className="border rounded-2xl bg-white p-4">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-lg font-bold">{STAGE_LABEL[stageKey]}</div>
-            <div className="text-xs text-gray-600">
-              Estado:{" "}
-              <b>
-                {s?.status ??
-                  (order?.current_stage === stageKey && order?.status === "active" ? STAGE_STATUS.IN_PROGRESS : STAGE_STATUS.PENDING)}
-              </b>
-            </div>
-          </div>
-
-          <div className="flex gap-2">
-            {approved && <span className="text-xs px-2 py-1 rounded-full bg-green-100">Aprobada</span>}
-            {active && !approved && <span className="text-xs px-2 py-1 rounded-full bg-yellow-100">Activa</span>}
-          </div>
-        </div>
-
-        <div className="mt-3 text-xs text-gray-600 space-y-1">
-          <div>Inicio: {formatDate(s?.started_at)}</div>
-          <div>Aprobación: {formatDate(s?.approved_at)}</div>
-          <div>Asignado a: <b>{userLabel(s?.assigned_user_id)}</b></div>
-        </div>
-
-        {/* Asignación */}
-        <div className="mt-3 border rounded-xl p-3 bg-gray-50">
-          <div className="text-sm font-semibold">Asignación</div>
-          <div className="text-xs text-gray-600">Supervisor/admin puede asignar un operario (opcional).</div>
-
-          <select
-            className="border p-2 rounded-xl w-full mt-2"
-            disabled={!canWorkAsSupervisor || saving}
-            value={s?.assigned_user_id ?? ""}
-            onChange={(e) => assignStage(stageKey, e.target.value ? e.target.value : null)}
-          >
-            <option value="">(Sin asignar)</option>
-            {people
-              .filter((p) => p.role === "operator" || p.role === "supervisor" || p.role === "admin")
-              .map((p) => (
-                <option key={p.user_id} value={p.user_id}>
-                  {p.role} · {p.user_id.slice(0, 8)}…
-                </option>
-              ))}
-          </select>
-
-          <div className="text-[11px] text-gray-500 mt-2">
-            Asignado por: {userLabel(s?.assigned_by)} · {formatDate(s?.assigned_at)}
-          </div>
-        </div>
-
-        {/* Evidencia */}
-        {needsEvidence && (
-          <div className="mt-3">
-            <div className="text-sm font-semibold">Evidencia</div>
-
-            {s?.evidence_url ? (
-              <div className="mt-2">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={s.evidence_url} alt="Evidencia" className="w-full max-h-64 object-cover rounded-xl border" />
-              </div>
-            ) : (
-              <div className="text-xs text-gray-500 mt-1">No hay evidencia subida.</div>
-            )}
-
-            {canWork && (
-              <div className="mt-3 border rounded-xl p-3 bg-gray-50">
-                <input
-                  type="file"
-                  accept="image/*,application/pdf"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null;
-                    setUploadFile(f);
-                    setUploadingStage(stageKey);
-                  }}
-                />
-
-                <input
-                  className="border p-2 rounded-xl w-full mt-2 text-sm"
-                  placeholder="Nota (opcional)"
-                  value={uploadingStage === stageKey ? uploadNote : ""}
-                  onChange={(e) => setUploadNote(e.target.value)}
-                />
-
-                <button
-                  className="mt-2 border px-3 py-2 rounded-xl bg-white disabled:opacity-50"
-                  disabled={saving || uploadingStage !== stageKey || !uploadFile}
-                  onClick={uploadEvidence}
-                >
-                  {saving && uploadingStage === stageKey ? "Subiendo..." : "Subir evidencia"}
-                </button>
-              </div>
-            )}
-
-            {!canWork && active && !approved && (
-              <div className="text-xs text-gray-500 mt-2">
-                * Para subir evidencia necesitas estar asignado a esta etapa (o ser supervisor/admin).
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* QC */}
-        {stageKey === "revision_calidad" && (
-          <div className="mt-3 border rounded-xl p-3 bg-gray-50">
-            <label className="flex items-center gap-2 text-sm">
-              <input type="checkbox" checked={qcChecked} onChange={(e) => setQcChecked(e.target.checked)} disabled={approved} />
-              Revisado y aprobado
-            </label>
-          </div>
-        )}
-
-        {/* Aprobar */}
-        <div className="mt-4">
-          <button
-            className="border px-3 py-2 rounded-xl bg-black text-white disabled:opacity-50"
-            disabled={!canApprove || saving || !active || approved}
-            onClick={() => approveStage(stageKey)}
-          >
-            {saving ? "Guardando..." : "Aprobar etapa"}
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  if (loading) return <div className="p-6">Cargando...</div>;
-  if (!order) return <div className="p-6 text-red-600">{errorMsg || "No se pudo cargar la orden."}</div>;
+  const badge = dueBadge(order.due_date, order.status);
 
   return (
     <main className="min-h-screen bg-gray-100 p-4">
-      <div className="max-w-5xl mx-auto">
-        <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/")}>
-          ← Volver al tablero
-        </button>
-
-        <div className="mt-3 grid gap-4 md:grid-cols-[1fr_320px] items-start">
-          <div>
-            <h1 className="text-2xl font-bold">{order.display_code_manual || "(sin consecutivo)"}</h1>
-
-            <div className="text-sm text-gray-700">
-              Cliente: <b>{order.client_name ?? "-"}</b> — Producto: <b>{order.product_name ?? "-"}</b> — Cantidad:{" "}
-              <b>{order.quantity ?? "-"}</b>
-            </div>
-
-            <div className="text-xs text-gray-600 mt-1">
-              Estado: <b>{order.status ?? "-"}</b> — Etapa actual: <b>{order.current_stage ?? "-"}</b>
-            </div>
-
-            {errorMsg && (
-              <div className="mt-4 border border-red-300 bg-red-50 text-red-700 rounded-xl p-3 text-sm">
-                <b>Error:</b> {errorMsg}
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
+        <div className="bg-white border rounded-2xl p-4">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-2xl font-bold">{order.display_code_manual ?? "(sin consecutivo)"}</div>
+              <div className="text-sm text-gray-600">
+                Cliente: <b>{order.client_name ?? "-"}</b> · Tipo: <b>{String(order.order_type ?? "-").toUpperCase()}</b>
               </div>
-            )}
+
+              <div className="text-sm text-gray-600">
+                Etapa actual: <b>{stageLabel(order.current_stage)}</b> · Cantidad total: <b>{order.quantity ?? "-"}</b>
+              </div>
+
+              <div className="mt-2 flex items-center gap-2">
+                <span className={`text-xs px-2 py-1 rounded-full ${badge.cls}`}>{badge.label}</span>
+                <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                  Entrega: <b>{fmtDate(order.due_date)}</b>
+                </span>
+                <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                  Creada: <b>{fmtDate(order.created_at)}</b>
+                </span>
+              </div>
+
+              {isOperator && (
+                <div className="text-xs text-gray-500 mt-2">
+                  Estás viendo solo tu módulo: <b>{stageLabel(myStage)}</b>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2 flex-wrap">
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/")}>
+                ← Volver
+              </button>
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => loadAll(role, user?.id)}>
+                Recargar
+              </button>
+            </div>
           </div>
 
-          <div className="bg-white border rounded-2xl p-3">
-            <div className="text-sm font-semibold mb-2">Imagen del producto</div>
-            {isValidHttpUrl(order.product_image_path) ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={order.product_image_path} alt="Producto" className="w-full h-44 object-cover rounded-xl border" />
-            ) : (
-              <div className="text-xs text-gray-500">(No hay una URL válida en product_image_path.)</div>
-            )}
-          </div>
+          {errorMsg && (
+            <div className="mt-3 border border-red-300 bg-red-50 text-red-700 rounded-xl p-3 text-sm">
+              <b>Error:</b> {errorMsg}
+            </div>
+          )}
         </div>
 
-        <div className="mt-6 grid gap-4 md:grid-cols-2">{STAGES.map((s) => stageCard(s))}</div>
+        {/* Items */}
+        <div className="mt-4 bg-white border rounded-2xl p-4">
+          <div className="text-lg font-semibold">Artículos de la orden</div>
+
+          {Object.keys(itemsGrouped).length === 0 ? (
+            <div className="text-sm text-gray-500 mt-2">Esta orden no tiene artículos.</div>
+          ) : (
+            <div className="mt-3 space-y-6">
+              {Object.keys(itemsGrouped)
+                .sort((a, b) => a.localeCompare(b))
+                .map((cat) => (
+                  <div key={cat}>
+                    <div className="flex items-center justify-between">
+                      <div className="font-bold">{cat}</div>
+                      <span className="text-xs px-2 py-1 rounded-full border bg-white">{itemsGrouped[cat].length}</span>
+                    </div>
+
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {itemsGrouped[cat].map((it) => (
+                        <div key={it.id} className="border rounded-2xl overflow-hidden bg-white">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={it.product_image_path} alt={it.product_name} className="w-full h-28 object-cover border-b" />
+                          <div className="p-3">
+                            <div className="font-semibold">{it.product_name}</div>
+                            <div className="text-xs text-gray-600">SKU: {it.sku ?? "-"}</div>
+                            <div className="text-xs text-gray-600">
+                              Cantidad: <b>{it.qty}</b> · Lead time: <b>{it.lead_time_days} días</b>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+
+        {/* Etapas */}
+        <div className="mt-4 bg-white border rounded-2xl p-4">
+          <div className="text-lg font-semibold">Etapas</div>
+
+          {!canSeeAll && (
+            <div className="text-xs text-gray-500 mt-1">* Como operario, solo ves tu etapa asignada.</div>
+          )}
+
+          <div className="mt-3 space-y-3">
+            {visibleStages.map((s) => {
+              const isCurrent = (order.current_stage ?? "") === s.stage;
+              const statusPill =
+                s.status === STAGE_STATUS.APPROVED
+                  ? "bg-green-100 text-green-800"
+                  : s.status === STAGE_STATUS.IN_PROGRESS
+                  ? "bg-blue-100 text-blue-800"
+                  : "bg-gray-100 text-gray-700";
+
+              return (
+                <div key={s.stage} className="border rounded-2xl p-4 bg-white">
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div>
+                      <div className="font-bold text-lg">
+                        {stageLabel(s.stage)}
+                        {isCurrent && <span className="ml-2 text-xs px-2 py-1 rounded-full bg-black text-white">Actual</span>}
+                      </div>
+
+                      <div className="mt-1 flex items-center gap-2 flex-wrap">
+                        <span className={`text-xs px-2 py-1 rounded-full ${statusPill}`}>{String(s.status).toUpperCase()}</span>
+                        <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                          Inicio: <b>{fmtDate(s.started_at)}</b>
+                        </span>
+                        <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                          Aprobación: <b>{fmtDate(s.approved_at)}</b>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 flex-wrap">
+                      <button
+                        className="px-3 py-2 rounded-xl bg-black text-white disabled:opacity-50"
+                        disabled={saving || !isCurrent}
+                        onClick={() => approve(s.stage)}
+                        title={!isCurrent ? "Solo puedes aprobar la etapa actual" : "Aprobar etapa"}
+                      >
+                        {saving ? "Procesando..." : "Aprobar etapa"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 grid gap-2">
+                    <div className="text-sm font-semibold">Evidencia</div>
+
+                    {s.evidence_url ? (
+                      <a className="text-sm underline" href={s.evidence_url} target="_blank" rel="noreferrer">
+                        Ver evidencia
+                      </a>
+                    ) : (
+                      <div className="text-sm text-gray-500">Sin evidencia</div>
+                    )}
+
+                    {isCurrent && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="file"
+                          onChange={(e) => setFileByStage((prev) => ({ ...prev, [s.stage]: e.target.files?.[0] ?? null }))}
+                          disabled={uploadingStage === s.stage}
+                        />
+                        <button
+                          className="border px-3 py-2 rounded-xl bg-white disabled:opacity-50"
+                          disabled={uploadingStage === s.stage || !fileByStage[s.stage]}
+                          onClick={() => uploadEvidence(s.stage)}
+                        >
+                          {uploadingStage === s.stage ? "Subiendo..." : "Subir evidencia"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-3 grid gap-2">
+                    <div className="text-sm font-semibold">Notas</div>
+                    <textarea
+                      className="border rounded-xl p-3 w-full min-h-[90px]"
+                      value={notesByStage[s.stage] ?? ""}
+                      onChange={(e) => setNotesByStage((prev) => ({ ...prev, [s.stage]: e.target.value }))}
+                      placeholder="Notas de esta etapa..."
+                    />
+                    <div className="flex gap-2">
+                      <button className="border px-3 py-2 rounded-xl bg-white disabled:opacity-50" disabled={saving} onClick={() => saveNotes(s.stage)}>
+                        Guardar notas
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+
+            {visibleStages.length === 0 && <div className="text-sm text-gray-500">No hay etapas visibles para tu usuario.</div>}
+          </div>
+        </div>
       </div>
     </main>
   );
