@@ -319,52 +319,30 @@ export default function OrderDetailPage() {
   };
 
   const approve = async (stageName: string) => {
-    if (!order) return;
+  if (!order) return;
 
-    setErrorMsg("");
-    setSaving(true);
+  setErrorMsg("");
+  setSaving(true);
 
-    try {
-      // En UI ya ocultamos botón, pero si igual llega aquí, BD lo valida.
-      const now = new Date().toISOString();
+  try {
+    // ✅ 1 sola llamada: aprueba y avanza la orden en BD
+    const res = await supabase.rpc("approve_stage_and_advance", {
+  oid: orderId,
+  st: stageName,
+});
 
-      const updStage = await supabase
-        .from(STAGES_TABLE)
-        .update({ status: STAGE_STATUS.APPROVED, approved_at: now })
-        .eq("order_id", orderId)
-        .eq("stage", stageName);
+    if (res.error) throw res.error;
 
-      if (updStage.error) throw updStage.error;
+    // ✅ Recargar orden y etapas para ver el cambio inmediatamente
+    await loadAll(role, user?.id);
 
-      const nxt = nextStage(stageName);
-      if (nxt) {
-        const updNext = await supabase
-          .from(STAGES_TABLE)
-          .update({ status: STAGE_STATUS.IN_PROGRESS, started_at: now })
-          .eq("order_id", orderId)
-          .eq("stage", nxt)
-          .eq("status", STAGE_STATUS.PENDING);
-
-        if (updNext.error) console.warn("No pude activar siguiente etapa:", updNext.error.message);
-
-        const updOrder = await supabase.from(ORDERS_TABLE).update({ current_stage: nxt }).eq("id", orderId);
-        if (updOrder.error) throw updOrder.error;
-      } else {
-        const updOrder = await supabase
-          .from(ORDERS_TABLE)
-          .update({ status: "completed", current_stage: "despacho" })
-          .eq("id", orderId);
-        if (updOrder.error) throw updOrder.error;
-      }
-
-      await loadAll(role, user?.id);
-      alert("✅ Etapa aprobada.");
-    } catch (e: any) {
-      alert("❌ Error aprobando: " + (e?.message ?? String(e)));
-    } finally {
-      setSaving(false);
-    }
-  };
+    alert("✅ Etapa aprobada. Nueva etapa: " + (res.data ?? ""));
+  } catch (e: any) {
+    alert("❌ Error aprobando: " + (e?.message ?? String(e)));
+  } finally {
+    setSaving(false);
+  }
+};
 
   if (loading) return <div className="p-6">Cargando orden...</div>;
   if (!order) return <div className="p-6">No se pudo cargar la orden.</div>;
