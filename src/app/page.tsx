@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../lib/supabaseClient";
-import TopNav from "../components/TopNav";
 
 type Role = "admin" | "supervisor" | "operator" | null;
 
-const ORDERS_TABLE = "ordenes_de_produccion";
 const PROFILES_TABLE = "profiles";
+const ORDERS_TABLE = "ordenes_de_produccion";
+const ITEMS_TABLE = "orden_items";
 
 const STAGES = ["venta", "diseno", "estampado", "confeccion", "revision_calidad", "despacho"] as const;
 
@@ -20,176 +20,304 @@ const STAGE_LABEL: Record<(typeof STAGES)[number], string> = {
   despacho: "Despacho",
 };
 
+type OrderRow = {
+  id: string;
+  display_code_manual: string | null;
+  order_type: string | null;
+  status: string | null;
+  current_stage: string | null;
+  client_name: string | null;
+  due_date: string | null;
+  created_at: string | null;
+  quantity: number | null;
+};
+
+type OrderItemRow = {
+  order_id: string;
+  product_name: string;
+  category: string;
+  qty: number;
+  product_image_path: string;
+};
+
+function fmtDate(iso?: string | null) {
+  if (!iso) return "-";
+  try {
+    return new Date(iso).toISOString().slice(0, 10);
+  } catch {
+    return String(iso);
+  }
+}
+
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function daysUntil(due?: string | null) {
+  if (!due) return null;
+  try {
+    const ms = new Date(due).getTime() - startOfToday();
+    return Math.floor(ms / (1000 * 60 * 60 * 24));
+  } catch {
+    return null;
+  }
+}
+
+// PASO 4: semáforo
+function dueBadge(due?: string | null, status?: string | null) {
+  if ((status ?? "").toLowerCase() === "completed") return { label: "Completada", cls: "bg-green-100 text-green-800" };
+  const d = daysUntil(due);
+  if (d === null) return { label: "Sin fecha", cls: "bg-gray-100 text-gray-700" };
+  if (d < 0) return { label: "Vencida", cls: "bg-red-100 text-red-800" };
+  if (d <= 2) return { label: `Por vencer (${d}d)`, cls: "bg-orange-100 text-orange-800" };
+  if (d <= 5) return { label: `Próxima (${d}d)`, cls: "bg-yellow-100 text-yellow-800" };
+  return { label: `En tiempo (${d}d)`, cls: "bg-emerald-100 text-emerald-800" };
+}
+
+// PASO 5: orden urgente primero
+function urgencyKey(o: OrderRow) {
+  // menor = más urgente
+  const st = (o.status ?? "").toLowerCase();
+  if (st === "completed") return 999999; // al final
+  const d = daysUntil(o.due_date);
+  if (d === null) return 500000; // sin fecha después de las urgentes
+  return d; // vencidas (<0) quedan primero
+}
+
 export default function HomePage() {
+  const [loading, setLoading] = useState(true);
+  const [errorMsg, setErrorMsg] = useState("");
+
   const [user, setUser] = useState<any>(null);
   const [role, setRole] = useState<Role>(null);
 
-  const [orders, setOrders] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [pageError, setPageError] = useState<string>("");
+  // Etapa asignada al operario (PASO 1)
+  const [myStage, setMyStage] = useState<string | null>(null);
 
-  const [boardStatus, setBoardStatus] = useState<"active" | "completed" | "all">("active");
-
-  const didInit = useRef(false);
+  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [items, setItems] = useState<OrderItemRow[]>([]);
 
   useEffect(() => {
-    if (didInit.current) return;
-    didInit.current = true;
     init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (user?.id) loadOrders(boardStatus);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boardStatus, user?.id]);
-
   const init = async () => {
     setLoading(true);
-    setPageError("");
-
+    setErrorMsg("");
     try {
-      const userRes = await supabase.auth.getUser();
-      const u = userRes.data.user ?? null;
+      const ures = await supabase.auth.getUser();
+      const u = ures.data.user ?? null;
       setUser(u);
-
       if (!u) {
         window.location.href = "/login";
         return;
       }
 
-      const profRes = await supabase.from(PROFILES_TABLE).select("role").eq("user_id", u.id).single();
-      setRole((profRes.data?.role ?? null) as Role);
+      const pres = await supabase.from(PROFILES_TABLE).select("role").eq("user_id", u.id).single();
+      const r = (pres.data?.role ?? null) as Role;
+      setRole(r);
 
-      await loadOrders(boardStatus);
+      // obtener etapa del operario (si aplica)
+      if (r === "operator") {
+        const st = await supabase.rpc("user_stage", { uid: u.id });
+        setMyStage((st.data ?? null) as string | null);
+      } else {
+        setMyStage(null);
+      }
+
+      await loadData(r, u.id);
     } catch (e: any) {
-      console.error(e);
-      setPageError(e?.message ?? String(e));
+      setErrorMsg(e?.message ?? String(e));
     } finally {
       setLoading(false);
     }
   };
 
-  const loadOrders = async (status: "active" | "completed" | "all") => {
-    setPageError("");
+  const loadData = async (r?: Role, uid?: string) => {
+    setErrorMsg("");
 
-    // ✅ usamos display_code_manual
-    let q = supabase
+    // Cargar órdenes
+    const ordRes = await supabase
       .from(ORDERS_TABLE)
-      .select(
-        "id, display_code_manual, order_type, status, current_stage, product_name, quantity, client_name, created_at, due_date"
-      )
-      .order("created_at", { ascending: true });
+      .select("id, display_code_manual, order_type, status, current_stage, client_name, due_date, created_at, quantity")
+      // PASO 5: en UI ordenamos por urgencia, aquí traemos bastante data
+      .limit(500);
 
-    if (status !== "all") q = q.eq("status", status);
-
-    const res = await q;
-    if (res.error) {
-      setPageError(res.error.message);
+    if (ordRes.error) {
+      setErrorMsg("Error cargando órdenes: " + ordRes.error.message);
       setOrders([]);
+      setItems([]);
       return;
     }
 
-    setOrders(res.data ?? []);
+    let ord = (ordRes.data ?? []) as OrderRow[];
+
+    // PASO 1: filtrar visibilidad
+    if (r === "operator") {
+      const st = await supabase.rpc("user_stage", { uid: uid });
+      const stage = (st.data ?? null) as string | null;
+
+      // operario ve SOLO órdenes cuya etapa actual es su etapa
+      ord = ord.filter((o) => (o.current_stage ?? "") === (stage ?? ""));
+    }
+
+    // PASO 5: ordenar más urgente primero (vencidas, por vencer, etc) + más antiguas primero
+    ord.sort((a, b) => {
+      const ka = urgencyKey(a);
+      const kb = urgencyKey(b);
+      if (ka !== kb) return ka - kb;
+      const ca = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const cb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return ca - cb;
+    });
+
+    setOrders(ord);
+
+    // Cargar items de esas órdenes (para mostrar resumen)
+    const ids = ord.map((o) => o.id);
+    if (ids.length === 0) {
+      setItems([]);
+      return;
+    }
+
+    const itRes = await supabase
+      .from(ITEMS_TABLE)
+      .select("order_id, product_name, category, qty, product_image_path")
+      .in("order_id", ids);
+
+    if (itRes.error) {
+      setErrorMsg("Error cargando items: " + itRes.error.message);
+      setItems([]);
+      return;
+    }
+
+    setItems((itRes.data ?? []) as OrderItemRow[]);
   };
 
-  const grouped = useMemo(() => {
-    const map: Record<string, any[]> = {};
-    for (const s of STAGES) map[s] = [];
-    for (const o of orders) {
-      const stage = o.current_stage ?? "venta";
-      if (!map[stage]) map[stage] = [];
-      map[stage].push(o);
+  const itemsByOrder = useMemo(() => {
+    const map: Record<string, OrderItemRow[]> = {};
+    for (const it of items) {
+      if (!map[it.order_id]) map[it.order_id] = [];
+      map[it.order_id].push(it);
     }
     return map;
-  }, [orders]);
+  }, [items]);
+
+  const canCreate = role === "admin" || role === "supervisor";
+
+  const openOrder = (id: string) => {
+    window.location.href = `/orders/${id}`;
+  };
 
   if (loading) return <div className="p-6">Cargando...</div>;
 
   return (
-    <main className="min-h-screen bg-gray-100">
-      <TopNav email={user?.email} role={role ?? undefined} />
+    <main className="min-h-screen bg-gray-100 p-4">
+      <div className="max-w-7xl mx-auto">
+        <div className="bg-white border rounded-2xl p-4">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-2xl font-bold">Tablero</div>
+              <div className="text-sm text-gray-600">
+                Usuario: <b>{user?.email ?? "-"}</b> — Rol: <b>{role ?? "sin rol"}</b>
+                {role === "operator" && (
+                  <>
+                    {" "}
+                    — Módulo: <b>{STAGE_LABEL[(myStage as any) ?? "venta"] ?? myStage ?? "sin asignar"}</b>
+                  </>
+                )}
+              </div>
+            </div>
 
-      <div className="p-4">
-        <div className="flex flex-wrap items-center gap-2 mb-4">
-          <div className="bg-white border rounded-xl p-1 flex">
-            <button
-              className={`px-3 py-2 rounded-lg text-sm ${boardStatus === "active" ? "bg-black text-white" : ""}`}
-              onClick={() => setBoardStatus("active")}
-            >
-              Activas
-            </button>
-            <button
-              className={`px-3 py-2 rounded-lg text-sm ${boardStatus === "completed" ? "bg-black text-white" : ""}`}
-              onClick={() => setBoardStatus("completed")}
-            >
-              Completadas
-            </button>
-            <button
-              className={`px-3 py-2 rounded-lg text-sm ${boardStatus === "all" ? "bg-black text-white" : ""}`}
-              onClick={() => setBoardStatus("all")}
-            >
-              Todas
-            </button>
+            <div className="flex gap-2 flex-wrap">
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => loadData(role, user?.id)}>
+                Recargar
+              </button>
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/catalog")}>
+                Catálogo
+              </button>
+              {(role === "admin") && (
+                <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/admin/users")}>
+                  Usuarios/Roles
+                </button>
+              )}
+              {canCreate && (
+                <button className="px-3 py-2 rounded-xl bg-black text-white" onClick={() => (window.location.href = "/orders/new")}>
+                  + Crear orden
+                </button>
+              )}
+            </div>
           </div>
 
-          {pageError && (
-            <div className="border border-red-300 bg-red-50 text-red-700 rounded-xl p-2 text-sm">
-              <b>Error:</b> {pageError}
+          {errorMsg && (
+            <div className="mt-3 border border-red-300 bg-red-50 text-red-700 rounded-xl p-3 text-sm">
+              <b>Error:</b> {errorMsg}
             </div>
           )}
         </div>
 
-        <div className="flex gap-4 overflow-x-auto pb-4">
-          {STAGES.map((stage) => (
-            <div key={stage} className="min-w-[290px] bg-white rounded-2xl shadow-sm flex-shrink-0 overflow-hidden">
-              <div className="bg-black text-white px-3 py-2">
-                <div className="flex items-center justify-between">
-                  <div className="font-semibold">{STAGE_LABEL[stage]}</div>
-                  <div className="text-xs bg-white/20 px-2 py-1 rounded-full">{grouped[stage]?.length ?? 0}</div>
-                </div>
-              </div>
+        {/* Lista ordenada por urgencia (PASO 5) */}
+        <div className="mt-4 grid gap-3">
+          {orders.map((o) => {
+            const badge = dueBadge(o.due_date, o.status);
+            const its = itemsByOrder[o.id] ?? [];
+            const first = its[0];
+            const restCount = Math.max(0, its.length - 1);
 
-              <div className="p-3 space-y-3">
-                {(grouped[stage] ?? []).map((o) => (
-                  <div
-                    key={o.id}
-                    onClick={() => (window.location.href = "/orders/" + o.id)}
-                    className="rounded-xl p-3 cursor-pointer border bg-gray-50 hover:shadow-sm"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="font-bold text-lg">
-                        {o.display_code_manual || "(sin consecutivo)"}
-                      </div>
-                      <span
-                        className={`text-[11px] px-2 py-1 rounded-full ${
-                          o.order_type === "produccion" ? "bg-blue-200" : "bg-green-200"
-                        }`}
-                      >
-                        {o.order_type ?? "-"}
-                      </span>
-                    </div>
-
-                    <div className="text-sm text-gray-700 mt-1">{o.product_name ?? "(sin nombre)"}</div>
-                    <div className="text-xs text-gray-500">Cliente: {o.client_name ?? "-"}</div>
-
-                    <div className="flex items-center justify-between mt-2">
-                      <div className="text-sm font-semibold">{o.quantity} uds</div>
-                      <div className="text-[11px] text-gray-500">{String(o.status ?? "").toUpperCase()}</div>
+            return (
+              <button
+                key={o.id}
+                onClick={() => openOrder(o.id)}
+                className="w-full text-left bg-white border rounded-2xl p-4 hover:bg-gray-50"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="font-bold truncate">{o.display_code_manual ?? "(sin consecutivo)"}</div>
+                    <div className="text-sm text-gray-600 truncate">
+                      Cliente: <b>{o.client_name ?? "-"}</b> · Etapa: <b>{STAGE_LABEL[(o.current_stage as any) ?? "venta"] ?? o.current_stage ?? "-"}</b>
                     </div>
                   </div>
-                ))}
 
-                {(grouped[stage] ?? []).length === 0 && (
-                  <div className="text-xs text-gray-400 text-center py-6">Sin órdenes</div>
-                )}
-              </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className={`text-xs px-2 py-1 rounded-full ${badge.cls}`}>{badge.label}</span>
+                    <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                      {String(o.order_type ?? "-").toUpperCase()}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex items-center gap-3">
+                  {first?.product_image_path ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={first.product_image_path} alt="Producto" className="w-12 h-12 rounded-xl object-cover border" />
+                  ) : (
+                    <div className="w-12 h-12 rounded-xl border bg-gray-100" />
+                  )}
+
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold truncate">
+                      {its.length === 0 ? "Sin items" : `${first.product_name}${restCount ? ` + ${restCount} más` : ""}`}
+                    </div>
+                    <div className="text-xs text-gray-600">
+                      Cant. total: <b>{o.quantity ?? "-"}</b> · Entrega: <b>{fmtDate(o.due_date)}</b> · Creada: <b>{fmtDate(o.created_at)}</b>
+                    </div>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+
+          {orders.length === 0 && (
+            <div className="text-sm text-gray-500 bg-white border rounded-2xl p-4">
+              No hay órdenes para mostrar en tu módulo.
             </div>
-          ))}
+          )}
         </div>
       </div>
     </main>
   );
 }
-
 
