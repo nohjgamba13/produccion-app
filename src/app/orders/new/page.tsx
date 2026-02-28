@@ -5,75 +5,52 @@ import { supabase } from "../../../lib/supabaseClient";
 
 type Role = "admin" | "supervisor" | "operator" | null;
 
-const PROFILES_TABLE = "profiles";
-const PRODUCTS_TABLE = "productos";
-const ORDERS_TABLE = "ordenes_de_produccion";
-const ORDER_ITEMS_TABLE = "orden_items";
-const STAGES_TABLE = "etapas_de_produccion";
+type SaleChannel = "web" | "apps" | "personalizados" | "tienda_fisica" | "institucional";
 
-const STAGES = ["venta", "diseno", "estampado", "confeccion", "revision_calidad", "despacho"] as const;
-
-const STAGE_STATUS = {
-  PENDING: "pending",
-  IN_PROGRESS: "in_progress",
-  APPROVED: "approved",
-} as const;
+const CHANNEL_LABEL: Record<SaleChannel, string> = {
+  web: "Venta página web",
+  apps: "Venta aplicaciones",
+  personalizados: "Ventas personalizados",
+  tienda_fisica: "Venta tienda física",
+  institucional: "Ventas institucionales",
+};
 
 type Product = {
   id: string;
   sku: string | null;
-  name: string;
-  category: string;
-  image_path: string;
-  is_active: boolean;
-  lead_time_days: number;
+  name: string | null;
+  description: string | null;
+  image_path: string | null;
+  category?: string | null;
+  is_active?: boolean | null;
 };
 
-type CartItem = {
-  product_id: string;
-  sku: string | null;
-  name: string;
-  category: string;
-  image_path: string;
-  lead_time_days: number;
-  qty: number;
+type ChannelSetting = {
+  channel: SaleChannel;
+  default_days: number | null;
 };
-
-function normCat(c?: string | null) {
-  const v = (c ?? "").trim();
-  return v ? v : "Sin categoría";
-}
-
-function isValidHttpUrl(u?: string | null) {
-  return !!u && /^https?:\/\//i.test(u);
-}
-
-function pad(n: number, len = 4) {
-  return String(n).padStart(len, "0");
-}
-
-function addDays(date: Date, days: number) {
-  const d = new Date(date);
-  d.setDate(d.getDate() + days);
-  return d;
-}
 
 export default function NewOrderPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const [user, setUser] = useState<any>(null);
   const [role, setRole] = useState<Role>(null);
+  const [userId, setUserId] = useState<string>("");
 
-  const [products, setProducts] = useState<Product[]>([]);
-  const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("__all__");
-
+  // Form
   const [clientName, setClientName] = useState("");
-  const [customCode, setCustomCode] = useState("");
-  const [dueDate, setDueDate] = useState(""); // opcional: si lo dejan vacío, se calcula por lead time
-  const [cart, setCart] = useState<CartItem[]>([]);
+  const [manualCode, setManualCode] = useState("");
+  const [saleChannel, setSaleChannel] = useState<SaleChannel>("web");
+
+  // Para institucional es obligatorio, para los demás es opcional
+  const [dueDate, setDueDate] = useState<string>("");
+
+  const [items, setItems] = useState<{ product_id: string; qty: number }[]>([]);
+
+  // data
+  const [products, setProducts] = useState<Product[]>([]);
+  const [settings, setSettings] = useState<ChannelSetting[]>([]);
 
   useEffect(() => {
     init();
@@ -85,44 +62,40 @@ export default function NewOrderPage() {
     setErrorMsg("");
     try {
       const ures = await supabase.auth.getUser();
-      const u = ures.data.user ?? null;
-      setUser(u);
+      const u = ures.data.user;
+
       if (!u) {
         window.location.href = "/login";
         return;
       }
 
-      const pres = await supabase.from(PROFILES_TABLE).select("role").eq("user_id", u.id).single();
+      setUserId(u.id);
+
+      const pres = await supabase.from("profiles").select("role").eq("user_id", u.id).single();
       const r = (pres.data?.role ?? null) as Role;
       setRole(r);
 
-      // Solo admin/supervisor crean órdenes
-      if (r !== "admin" && r !== "supervisor") {
-        window.location.href = "/";
+      if (!(r === "admin" || r === "supervisor")) {
+        setErrorMsg("No tienes permisos para crear órdenes.");
+        setLoading(false);
         return;
       }
 
-      const res = await supabase
-        .from(PRODUCTS_TABLE)
-        .select("id, sku, name, category, image_path, is_active, lead_time_days")
+      // Productos activos
+      const prodRes = await supabase
+        .from("productos")
+        .select("id, sku, name, description, image_path, category, is_active")
         .eq("is_active", true)
         .order("category", { ascending: true })
         .order("name", { ascending: true });
 
-      if (res.error) throw res.error;
+      if (prodRes.error) throw prodRes.error;
+      setProducts((prodRes.data ?? []) as Product[]);
 
-      const data = (res.data ?? []) as any[];
-      // Asegurar category y lead_time_days
-      const normalized: Product[] = data.map((p) => ({
-        id: p.id,
-        sku: p.sku ?? null,
-        name: p.name,
-        category: normCat(p.category),
-        image_path: p.image_path,
-        is_active: !!p.is_active,
-        lead_time_days: Number(p.lead_time_days ?? 0),
-      }));
-      setProducts(normalized);
+      // Settings de canales
+      const setRes = await supabase.from("sale_channel_settings").select("channel, default_days");
+      if (setRes.error) throw setRes.error;
+      setSettings((setRes.data ?? []) as ChannelSetting[]);
     } catch (e: any) {
       setErrorMsg(e?.message ?? String(e));
     } finally {
@@ -130,176 +103,125 @@ export default function NewOrderPage() {
     }
   };
 
-  const categories = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of products) set.add(p.category);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  const settingsMap = useMemo(() => {
+    const m: Partial<Record<SaleChannel, number | null>> = {};
+    for (const s of settings) m[s.channel] = s.default_days ?? null;
+    return m;
+  }, [settings]);
+
+  const previewDueDate = useMemo(() => {
+    // Si el usuario puso una fecha manual, esa manda
+    if (dueDate) return dueDate;
+
+    // Institucional: sin fecha manual no hay estimado (porque es personalizada)
+    if (saleChannel === "institucional") return "";
+
+    // Si no, mostramos un preview con el default del canal (solo aproximado)
+    const days = (settingsMap[saleChannel] ?? 4) as number;
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10);
+  }, [dueDate, saleChannel, settingsMap]);
+
+  const productById = useMemo(() => {
+    const m: Record<string, Product> = {};
+    for (const p of products) m[p.id] = p;
+    return m;
   }, [products]);
 
-  const filteredProducts = useMemo(() => {
-    const s = search.trim().toLowerCase();
-    return products.filter((p) => {
-      if (categoryFilter !== "__all__" && p.category !== categoryFilter) return false;
-      if (!s) return true;
-      const hay = `${p.name} ${p.sku ?? ""} ${p.category}`.toLowerCase();
-      return hay.includes(s);
-    });
-  }, [products, search, categoryFilter]);
+  const productsByCategory = useMemo(() => {
+    const m: Record<string, Product[]> = {};
+    for (const p of products) {
+      const cat = (p.category ?? "Sin categoría").trim() || "Sin categoría";
+      if (!m[cat]) m[cat] = [];
+      m[cat].push(p);
+    }
+    return m;
+  }, [products]);
 
-  const groupedProducts = useMemo(() => {
-    const map: Record<string, Product[]> = {};
-    for (const p of filteredProducts) {
-      if (!map[p.category]) map[p.category] = [];
-      map[p.category].push(p);
-    }
-    return map;
-  }, [filteredProducts]);
-
-  const addToCart = (p: Product) => {
-    if (!p.image_path || !isValidHttpUrl(p.image_path)) {
-      alert("Este producto no tiene foto válida (es obligatoria).");
-      return;
-    }
-    if (!p.category || p.category.trim() === "") {
-      alert("Este producto no tiene categoría. Corrígelo en Catálogo.");
-      return;
-    }
-    if (!Number.isFinite(p.lead_time_days)) {
-      alert("Este producto no tiene lead_time_days válido.");
-      return;
-    }
-
-    setCart((prev) => {
-      const idx = prev.findIndex((x) => x.product_id === p.id);
+  const addItem = (pid: string) => {
+    setItems((prev) => {
+      const idx = prev.findIndex((x) => x.product_id === pid);
       if (idx >= 0) {
         const copy = [...prev];
         copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
         return copy;
       }
-      return [
-        ...prev,
-        {
-          product_id: p.id,
-          sku: p.sku,
-          name: p.name,
-          category: p.category,
-          image_path: p.image_path,
-          lead_time_days: p.lead_time_days,
-          qty: 1,
-        },
-      ];
+      return [...prev, { product_id: pid, qty: 1 }];
     });
   };
 
-  const removeFromCart = (product_id: string) => {
-    setCart((prev) => prev.filter((x) => x.product_id !== product_id));
+  const removeItem = (pid: string) => {
+    setItems((prev) => prev.filter((x) => x.product_id !== pid));
   };
 
-  const setQty = (product_id: string, qty: number) => {
-    if (!qty || qty < 1) qty = 1;
-    setCart((prev) => prev.map((x) => (x.product_id === product_id ? { ...x, qty } : x)));
+  const changeQty = (pid: string, qty: number) => {
+    setItems((prev) =>
+      prev.map((x) => (x.product_id === pid ? { ...x, qty: Math.max(1, qty) } : x))
+    );
   };
 
-  const totalQty = useMemo(() => cart.reduce((a, b) => a + b.qty, 0), [cart]);
-
-  const orderType = useMemo(() => (totalQty >= 20 ? "produccion" : "venta"), [totalQty]);
-
-  const computedDueDate = useMemo(() => {
-    if (dueDate) return dueDate;
-    const maxLead = cart.length ? Math.max(...cart.map((x) => x.lead_time_days || 0)) : 0;
-    const d = addDays(new Date(), maxLead);
-    return d.toISOString().slice(0, 10);
-  }, [dueDate, cart]);
-
-  const generateAutoCode = async () => {
-    const year = new Date().getFullYear();
-    const prefix = `OP-${year}-`;
-
-    const res = await supabase
-      .from(ORDERS_TABLE)
-      .select("display_code_manual, created_at")
-      .ilike("display_code_manual", `${prefix}%`)
-      .order("created_at", { ascending: false })
-      .limit(1);
-
-    if (res.error) return `${prefix}${Date.now()}`;
-
-    const last = res.data?.[0]?.display_code_manual as string | undefined;
-    if (!last || !last.startsWith(prefix)) return `${prefix}${pad(1)}`;
-
-    const tail = last.slice(prefix.length);
-    const num = parseInt(tail, 10);
-    if (!isFinite(num)) return `${prefix}${pad(1)}`;
-
-    return `${prefix}${pad(num + 1)}`;
-  };
+  const totalQty = useMemo(() => items.reduce((a, b) => a + (b.qty || 0), 0), [items]);
 
   const createOrder = async () => {
     setErrorMsg("");
-    if (!user?.id) return alert("No hay usuario autenticado.");
-    if (!clientName.trim()) return alert("Falta cliente.");
-    if (cart.length === 0) return alert("Agrega al menos 1 artículo.");
+
+    if (!clientName.trim()) {
+      setErrorMsg("Debes ingresar el nombre del cliente.");
+      return;
+    }
+    if (items.length === 0) {
+      setErrorMsg("Debes agregar al menos 1 producto.");
+      return;
+    }
+
+    // ✅ Institucional: due_date obligatorio
+    if (saleChannel === "institucional" && !dueDate) {
+      setErrorMsg("Para ventas institucionales debes seleccionar una fecha de entrega.");
+      return;
+    }
 
     setSaving(true);
     try {
-      const code = customCode.trim() ? customCode.trim() : await generateAutoCode();
+      const orderPayload: any = {
+        client_name: clientName.trim(),
+        display_code_manual: manualCode.trim() || null,
+        sale_channel: saleChannel,
+        quantity: totalQty,
+        created_by: userId,
+        // Si dueDate está vacío => el trigger la calcula automáticamente (excepto institucional)
+        due_date: dueDate ? dueDate : null,
+      };
 
-      // Crear orden (cabecera)
-      const insOrder = await supabase
-        .from(ORDERS_TABLE)
-        .insert({
-          created_by: user.id,
-          display_code_manual: code,
-          seq_code: code,
-          product_ref: "MULTI", // ya no es 1 producto
-          order_type: orderType,
-          status: "active",
-          current_stage: "venta",
-          quantity: totalQty,
-          client_name: clientName.trim(),
-          due_date: computedDueDate || null,
-        })
+      const oRes = await supabase
+        .from("ordenes_de_produccion")
+        .insert(orderPayload)
         .select("id")
         .single();
 
-      if (insOrder.error) throw insOrder.error;
+      if (oRes.error) throw oRes.error;
 
-      const orderId = insOrder.data.id as string;
+      const orderId = oRes.data.id as string;
 
       // Insertar items
-      const itemsPayload = cart.map((x) => ({
-        order_id: orderId,
-        product_id: x.product_id,
-        product_name: x.name,
-        product_image_path: x.image_path,
-        category: x.category,
-        sku: x.sku,
-        qty: x.qty,
-        lead_time_days: x.lead_time_days ?? 0,
-      }));
+      const rows = items.map((it) => {
+        const p = productById[it.product_id];
+        return {
+          order_id: orderId,
+          product_id: it.product_id,
+          qty: it.qty,
+          product_name: p?.name ?? "",
+          category: (p?.category ?? "Sin categoría") as any,
+          product_image_path: p?.image_path ?? null,
+        };
+      });
 
-      const insItems = await supabase.from(ORDER_ITEMS_TABLE).insert(itemsPayload);
-      if (insItems.error) throw insItems.error;
-
-      // Crear etapas
-      const now = new Date().toISOString();
-      const stageRows = STAGES.map((s) => ({
-        order_id: orderId,
-        stage: s,
-        status: s === "venta" ? STAGE_STATUS.IN_PROGRESS : STAGE_STATUS.PENDING,
-        started_at: s === "venta" ? now : null,
-        approved_at: null,
-        evidence_url: null,
-        notes: null,
-      }));
-
-      const insStages = await supabase.from(STAGES_TABLE).insert(stageRows);
-      if (insStages.error) throw insStages.error;
+      const iRes = await supabase.from("orden_items").insert(rows);
+      if (iRes.error) throw iRes.error;
 
       window.location.href = `/orders/${orderId}`;
     } catch (e: any) {
       setErrorMsg(e?.message ?? String(e));
-      alert("Error creando orden: " + (e?.message ?? String(e)));
     } finally {
       setSaving(false);
     }
@@ -310,115 +232,215 @@ export default function NewOrderPage() {
   return (
     <main className="min-h-screen bg-gray-100 p-4">
       <div className="max-w-6xl mx-auto">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div>
-            <h1 className="text-2xl font-bold">Crear Orden</h1>
-            <div className="text-sm text-gray-600">
-              Tipo: <b>{orderType.toUpperCase()}</b> · Cantidad total: <b>{totalQty}</b> · Entrega sugerida:{" "}
-              <b>{computedDueDate || "-"}</b>
+        <div className="bg-white border rounded-2xl p-4">
+          <div className="text-2xl font-bold">Crear orden</div>
+          <div className="text-sm text-gray-600 mt-1">
+            Tipo de venta: <b>{CHANNEL_LABEL[saleChannel]}</b>
+            {saleChannel !== "institucional" && (
+              <>
+                {" "}
+                · Entrega estimada (si dejas vacío): <b>{previewDueDate}</b>
+              </>
+            )}
+            {saleChannel === "institucional" && (
+              <>
+                {" "}
+                · <b>Entrega personalizada (obligatoria)</b>
+              </>
+            )}
+          </div>
+
+          {errorMsg && (
+            <div className="mt-3 border border-red-300 bg-red-50 text-red-700 rounded-xl p-3 text-sm">
+              <b>Error:</b> {errorMsg}
             </div>
-          </div>
+          )}
 
-          <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/")}>
-            ← Volver
-          </button>
-        </div>
-
-        {errorMsg && (
-          <div className="mt-4 border border-red-300 bg-red-50 text-red-700 rounded-xl p-3 text-sm">
-            <b>Error:</b> {errorMsg}
-          </div>
-        )}
-
-        <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_420px] items-start">
-          {/* Datos orden */}
-          <div className="bg-white border rounded-2xl p-4">
-            <div className="grid gap-3">
-              <input className="border p-3 rounded-xl w-full" placeholder="Cliente" value={clientName} onChange={(e) => setClientName(e.target.value)} />
-              <input className="border p-3 rounded-xl w-full" placeholder="Consecutivo personalizado (opcional)" value={customCode} onChange={(e) => setCustomCode(e.target.value)} />
-
-              <div className="grid md:grid-cols-2 gap-3">
-                <input
-                  type="date"
-                  className="border p-3 rounded-xl w-full"
-                  value={dueDate}
-                  onChange={(e) => setDueDate(e.target.value)}
-                />
-                <div className="text-xs text-gray-500 flex items-center">
-                  Si lo dejas vacío, se calcula con el mayor lead_time_days del carrito.
-                </div>
-              </div>
-
-              <button className="bg-black text-white px-4 py-3 rounded-xl w-full disabled:opacity-50" disabled={saving} onClick={createOrder}>
-                {saving ? "Creando..." : "Crear Orden"}
-              </button>
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-sm text-gray-600">Cliente</label>
+              <input
+                className="w-full border rounded-xl px-3 py-2 bg-white"
+                value={clientName}
+                onChange={(e) => setClientName(e.target.value)}
+                placeholder="Nombre del cliente"
+              />
             </div>
-          </div>
 
-          {/* Selector productos por categorías */}
-          <div className="bg-white border rounded-2xl p-4">
-            <div className="text-lg font-semibold">Agregar artículos</div>
+            <div>
+              <label className="text-sm text-gray-600">Consecutivo manual (opcional)</label>
+              <input
+                className="w-full border rounded-xl px-3 py-2 bg-white"
+                value={manualCode}
+                onChange={(e) => setManualCode(e.target.value)}
+                placeholder="Ej: OV-00123"
+              />
+            </div>
 
-            <div className="mt-3 grid gap-2">
-              <input className="border p-3 rounded-xl w-full" placeholder="Buscar..." value={search} onChange={(e) => setSearch(e.target.value)} />
-              <select className="border p-3 rounded-xl w-full" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
-                <option value="__all__">Todas las categorías</option>
-                {categories.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
+            <div>
+              <label className="text-sm text-gray-600">Tipo de venta</label>
+              <select
+                className="w-full border rounded-xl px-3 py-2 bg-white"
+                value={saleChannel}
+                onChange={(e) => {
+                  const val = e.target.value as SaleChannel;
+                  setSaleChannel(val);
+
+                  // Si cambia a no-institucional, permitimos limpiar dueDate para que aplique automático
+                  // Si cambia a institucional, dejamos lo que tenga pero será obligatorio antes de crear
+                }}
+              >
+                <option value="web">{CHANNEL_LABEL.web}</option>
+                <option value="apps">{CHANNEL_LABEL.apps}</option>
+                <option value="personalizados">{CHANNEL_LABEL.personalizados}</option>
+                <option value="tienda_fisica">{CHANNEL_LABEL.tienda_fisica}</option>
+                <option value="institucional">{CHANNEL_LABEL.institucional}</option>
               </select>
             </div>
 
-            <div className="mt-3 max-h-[420px] overflow-auto pr-1 space-y-5">
-              {Object.keys(groupedProducts).sort((a, b) => a.localeCompare(b)).map((cat) => (
-                <div key={cat}>
-                  <div className="font-bold">{cat}</div>
-                  <div className="mt-2 grid gap-2">
-                    {groupedProducts[cat].map((p) => (
-                      <button key={p.id} className="border rounded-xl p-2 text-left hover:bg-gray-50" onClick={() => addToCart(p)}>
-                        <div className="font-semibold">{p.name}</div>
-                        <div className="text-xs text-gray-600">SKU: {p.sku ?? "-"} · Lead time: {p.lead_time_days} días</div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              {filteredProducts.length === 0 && <div className="text-sm text-gray-500">No hay productos con ese filtro.</div>}
-            </div>
-
-            {/* Carrito */}
-            <div className="mt-4 border-t pt-3">
-              <div className="font-semibold">Carrito ({totalQty})</div>
-              {cart.length === 0 ? (
-                <div className="text-sm text-gray-500 mt-2">Aún no has agregado artículos.</div>
-              ) : (
-                <div className="mt-2 space-y-2">
-                  {cart.map((x) => (
-                    <div key={x.product_id} className="border rounded-xl p-2 bg-white">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="font-semibold truncate">{x.name}</div>
-                          <div className="text-xs text-gray-600">Categoría: {x.category} · Lead: {x.lead_time_days} días</div>
-                        </div>
-                        <button className="text-sm underline" onClick={() => removeFromCart(x.product_id)}>Quitar</button>
-                      </div>
-                      <div className="mt-2 flex items-center gap-2">
-                        <span className="text-xs text-gray-600">Cant:</span>
-                        <input
-                          type="number"
-                          min={1}
-                          className="border rounded-lg px-2 py-1 w-24"
-                          value={x.qty}
-                          onChange={(e) => setQty(x.product_id, Number(e.target.value))}
-                        />
-                      </div>
-                    </div>
-                  ))}
+            <div>
+              <label className="text-sm text-gray-600">
+                Fecha de entrega{" "}
+                {saleChannel === "institucional" ? "(obligatoria)" : "(opcional: vacío = automática)"}
+              </label>
+              <input
+                type="date"
+                className="w-full border rounded-xl px-3 py-2 bg-white"
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+              />
+              <div className="text-xs text-gray-500 mt-1">
+                {saleChannel === "institucional"
+                  ? "En ventas institucionales debes escoger la fecha exacta."
+                  : "Si está vacío, se calcula automáticamente según el tipo de venta."}
+              </div>
+              {saleChannel === "institucional" && !dueDate && (
+                <div className="text-xs text-red-600 mt-1">
+                  ⚠️ Debes seleccionar una fecha para poder crear la orden.
                 </div>
               )}
             </div>
-
           </div>
+
+          <div className="mt-4 flex items-center justify-between gap-2 flex-wrap">
+            <div className="text-sm text-gray-700">
+              Items: <b>{items.length}</b> · Cantidad total: <b>{totalQty}</b>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                className="border px-3 py-2 rounded-xl bg-white"
+                onClick={() => (window.location.href = "/")}
+              >
+                Cancelar
+              </button>
+
+              <button
+                className="px-4 py-2 rounded-xl bg-black text-white disabled:opacity-50"
+                disabled={saving}
+                onClick={createOrder}
+              >
+                {saving ? "Creando..." : "Crear orden"}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Catálogo por categorías */}
+        <div className="mt-4 bg-white border rounded-2xl p-4">
+          <div className="text-xl font-bold">Catálogo</div>
+          <div className="text-sm text-gray-600">
+            Selecciona productos (puedes escoger varios de distintas categorías)
+          </div>
+
+          {Object.keys(productsByCategory).map((cat) => (
+            <div key={cat} className="mt-4">
+              <div className="font-semibold mb-2">{cat}</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {productsByCategory[cat].map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => addItem(p.id)}
+                    className="text-left border rounded-2xl p-3 bg-white hover:bg-gray-50"
+                  >
+                    <div className="flex gap-3">
+                      {p.image_path ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={p.image_path}
+                          alt="Producto"
+                          className="w-16 h-16 rounded-xl object-cover border"
+                        />
+                      ) : (
+                        <div className="w-16 h-16 rounded-xl border bg-gray-100" />
+                      )}
+
+                      <div className="min-w-0">
+                        <div className="font-bold truncate">{p.name ?? "-"}</div>
+                        <div className="text-xs text-gray-600 truncate">SKU: {p.sku ?? "-"}</div>
+                        <div className="text-xs text-gray-500 line-clamp-2">{p.description ?? ""}</div>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-xs text-gray-600">➕ Agregar</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Items seleccionados */}
+        <div className="mt-4 bg-white border rounded-2xl p-4">
+          <div className="text-xl font-bold">Artículos seleccionados</div>
+
+          {items.length === 0 ? (
+            <div className="text-sm text-gray-500 mt-2">Aún no has agregado productos.</div>
+          ) : (
+            <div className="mt-3 grid gap-3">
+              {items.map((it) => {
+                const p = productById[it.product_id];
+                return (
+                  <div
+                    key={it.product_id}
+                    className="border rounded-2xl p-3 flex items-center justify-between gap-3 flex-wrap"
+                  >
+                    <div className="flex items-center gap-3">
+                      {p?.image_path ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={p.image_path}
+                          alt="Producto"
+                          className="w-12 h-12 rounded-xl object-cover border"
+                        />
+                      ) : (
+                        <div className="w-12 h-12 rounded-xl border bg-gray-100" />
+                      )}
+                      <div>
+                        <div className="font-semibold">{p?.name ?? "-"}</div>
+                        <div className="text-xs text-gray-600">SKU: {p?.sku ?? "-"}</div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={1}
+                        className="w-24 border rounded-xl px-3 py-2 bg-white"
+                        value={it.qty}
+                        onChange={(e) => changeQty(it.product_id, Number(e.target.value))}
+                      />
+                      <button
+                        className="border px-3 py-2 rounded-xl bg-white"
+                        onClick={() => removeItem(it.product_id)}
+                      >
+                        Quitar
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     </main>
