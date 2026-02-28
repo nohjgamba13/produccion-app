@@ -133,6 +133,9 @@ export default function OrderDetailPage() {
   const [items, setItems] = useState<OrderItemRow[]>([]);
   const [stages, setStages] = useState<StageRow[]>([]);
 
+  // Permisos por etapa (para ocultar botón)
+  const [canApproveMap, setCanApproveMap] = useState<Record<string, boolean>>({});
+
   const [uploadingStage, setUploadingStage] = useState<string | null>(null);
   const [fileByStage, setFileByStage] = useState<Record<string, File | null>>({});
   const [notesByStage, setNotesByStage] = useState<Record<string, string>>({});
@@ -230,8 +233,17 @@ export default function OrderDetailPage() {
 
     if (r === "operator" || r === "operador") {
       const stg = await supabase.rpc("user_stage", { uid });
-      const stage = (stg.data ?? null) as string | null;
-      setMyStage(stage);
+      setMyStage((stg.data ?? null) as string | null);
+    }
+
+    // Cargar permisos por etapa (para ocultar botón)
+    if (uid) {
+      const perms: Record<string, boolean> = {};
+      for (const s of (st.data ?? []) as any[]) {
+        const rr = await supabase.rpc("can_approve_stage", { uid, st: s.stage });
+        perms[s.stage] = !!rr.data;
+      }
+      setCanApproveMap(perms);
     }
   };
 
@@ -250,12 +262,6 @@ export default function OrderDetailPage() {
     if (isOperator) return stages.filter((s) => s.stage === myStage);
     return [];
   }, [stages, canSeeAll, isOperator, myStage]);
-
-  const canApproveStage = async (stageName: string) => {
-    if (!user?.id) return false;
-    const res = await supabase.rpc("can_approve_stage", { uid: user.id, st: stageName });
-    return !!res.data;
-  };
 
   const uploadEvidence = async (stageName: string) => {
     setErrorMsg("");
@@ -319,12 +325,7 @@ export default function OrderDetailPage() {
     setSaving(true);
 
     try {
-      const ok = await canApproveStage(stageName);
-      if (!ok) {
-        alert("No tienes permiso para aprobar esta etapa.");
-        return;
-      }
-
+      // En UI ya ocultamos botón, pero si igual llega aquí, BD lo valida.
       const now = new Date().toISOString();
 
       const updStage = await supabase
@@ -349,7 +350,10 @@ export default function OrderDetailPage() {
         const updOrder = await supabase.from(ORDERS_TABLE).update({ current_stage: nxt }).eq("id", orderId);
         if (updOrder.error) throw updOrder.error;
       } else {
-        const updOrder = await supabase.from(ORDERS_TABLE).update({ status: "completed", current_stage: "despacho" }).eq("id", orderId);
+        const updOrder = await supabase
+          .from(ORDERS_TABLE)
+          .update({ status: "completed", current_stage: "despacho" })
+          .eq("id", orderId);
         if (updOrder.error) throw updOrder.error;
       }
 
@@ -378,7 +382,6 @@ export default function OrderDetailPage() {
               <div className="text-sm text-gray-600">
                 Cliente: <b>{order.client_name ?? "-"}</b> · Tipo: <b>{String(order.order_type ?? "-").toUpperCase()}</b>
               </div>
-
               <div className="text-sm text-gray-600">
                 Etapa actual: <b>{stageLabel(order.current_stage)}</b> · Cantidad total: <b>{order.quantity ?? "-"}</b>
               </div>
@@ -459,13 +462,13 @@ export default function OrderDetailPage() {
         <div className="mt-4 bg-white border rounded-2xl p-4">
           <div className="text-lg font-semibold">Etapas</div>
 
-          {!canSeeAll && (
-            <div className="text-xs text-gray-500 mt-1">* Como operario, solo ves tu etapa asignada.</div>
-          )}
+          {!canSeeAll && <div className="text-xs text-gray-500 mt-1">* Como operario, solo ves tu etapa asignada.</div>}
 
           <div className="mt-3 space-y-3">
             {visibleStages.map((s) => {
               const isCurrent = (order.current_stage ?? "") === s.stage;
+              const allowed = !!canApproveMap[s.stage];
+
               const statusPill =
                 s.status === STAGE_STATUS.APPROVED
                   ? "bg-green-100 text-green-800"
@@ -491,20 +494,29 @@ export default function OrderDetailPage() {
                           Aprobación: <b>{fmtDate(s.approved_at)}</b>
                         </span>
                       </div>
+
+                      {isCurrent && !allowed && (
+                        <div className="mt-2 text-xs text-red-600">
+                          No tienes permiso para aprobar esta etapa.
+                        </div>
+                      )}
                     </div>
 
                     <div className="flex gap-2 flex-wrap">
-                      <button
-                        className="px-3 py-2 rounded-xl bg-black text-white disabled:opacity-50"
-                        disabled={saving || !isCurrent}
-                        onClick={() => approve(s.stage)}
-                        title={!isCurrent ? "Solo puedes aprobar la etapa actual" : "Aprobar etapa"}
-                      >
-                        {saving ? "Procesando..." : "Aprobar etapa"}
-                      </button>
+                      {/* ✅ Solo se muestra si es etapa actual y tiene permiso */}
+                      {isCurrent && allowed && (
+                        <button
+                          className="px-3 py-2 rounded-xl bg-black text-white disabled:opacity-50"
+                          disabled={saving}
+                          onClick={() => approve(s.stage)}
+                        >
+                          {saving ? "Procesando..." : "Aprobar etapa"}
+                        </button>
+                      )}
                     </div>
                   </div>
 
+                  {/* Evidencia */}
                   <div className="mt-3 grid gap-2">
                     <div className="text-sm font-semibold">Evidencia</div>
 
@@ -516,6 +528,7 @@ export default function OrderDetailPage() {
                       <div className="text-sm text-gray-500">Sin evidencia</div>
                     )}
 
+                    {/* Subida solo para etapa actual */}
                     {isCurrent && (
                       <div className="flex flex-wrap items-center gap-2">
                         <input
@@ -534,6 +547,7 @@ export default function OrderDetailPage() {
                     )}
                   </div>
 
+                  {/* Notas */}
                   <div className="mt-3 grid gap-2">
                     <div className="text-sm font-semibold">Notas</div>
                     <textarea
