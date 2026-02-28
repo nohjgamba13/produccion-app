@@ -5,14 +5,13 @@ import { supabase } from "../../../lib/supabaseClient";
 
 type Role = "admin" | "supervisor" | "operator" | null;
 
-const ORDERS_TABLE = "ordenes_de_produccion";
-const STAGES_TABLE = "etapas_de_produccion";
 const PROFILES_TABLE = "profiles";
 const PRODUCTS_TABLE = "productos";
+const ORDERS_TABLE = "ordenes_de_produccion";
+const ORDER_ITEMS_TABLE = "orden_items";
+const STAGES_TABLE = "etapas_de_produccion";
 
 const STAGES = ["venta", "diseno", "estampado", "confeccion", "revision_calidad", "despacho"] as const;
-
-const getOrderType = (qty: number) => (qty >= 20 ? "produccion" : "venta");
 
 const STAGE_STATUS = {
   PENDING: "pending",
@@ -24,90 +23,57 @@ type Product = {
   id: string;
   sku: string | null;
   name: string;
-  image_path: string | null;
+  category: string;
+  image_path: string;
   is_active: boolean;
-
-  category: string | null; // ✅ obligatoria en catálogo
-  base_price: number | null;
-  lead_time_days: number | null;
+  lead_time_days: number;
 };
 
-function pad(n: number, len = 4) {
-  return String(n).padStart(len, "0");
+type CartItem = {
+  product_id: string;
+  sku: string | null;
+  name: string;
+  category: string;
+  image_path: string;
+  lead_time_days: number;
+  qty: number;
+};
+
+function normCat(c?: string | null) {
+  const v = (c ?? "").trim();
+  return v ? v : "Sin categoría";
 }
 
 function isValidHttpUrl(u?: string | null) {
   return !!u && /^https?:\/\//i.test(u);
 }
 
-function money(n?: number | null) {
-  if (n === null || n === undefined || Number.isNaN(n)) return "-";
-  return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(n);
+function pad(n: number, len = 4) {
+  return String(n).padStart(len, "0");
 }
 
-function normCat(c?: string | null) {
-  const v = (c ?? "").trim();
-  return v ? v : "(Sin categoría)";
+function addDays(date: Date, days: number) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
 }
 
 export default function NewOrderPage() {
-  const [user, setUser] = useState<any>(null);
-  const [role, setRole] = useState<Role>(null);
-
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
+  const [user, setUser] = useState<any>(null);
+  const [role, setRole] = useState<Role>(null);
+
   const [products, setProducts] = useState<Product[]>([]);
-  const [searchProduct, setSearchProduct] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<string>("__all__");
-  const [selectedProductId, setSelectedProductId] = useState<string>("");
-
-  const selectedProduct = useMemo(
-    () => products.find((p) => p.id === selectedProductId) ?? null,
-    [products, selectedProductId]
-  );
-
-  const categories = useMemo(() => {
-    const set = new Set<string>();
-    for (const p of products) {
-      if (!p.is_active) continue;
-      const c = normCat(p.category);
-      if (c !== "(Sin categoría)") set.add(c);
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [products]);
-
-  const filteredProducts = useMemo(() => {
-    const s = searchProduct.trim().toLowerCase();
-    return products.filter((p) => {
-      if (!p.is_active) return false;
-      const c = normCat(p.category);
-      if (categoryFilter !== "__all__" && c !== categoryFilter) return false;
-
-      if (!s) return true;
-      const hay = `${p.name} ${p.sku ?? ""} ${p.category ?? ""}`.toLowerCase();
-      return hay.includes(s);
-    });
-  }, [products, searchProduct, categoryFilter]);
-
-  const groupedProducts = useMemo(() => {
-    const map: Record<string, Product[]> = {};
-    for (const p of filteredProducts) {
-      const c = normCat(p.category);
-      if (!map[c]) map[c] = [];
-      map[c].push(p);
-    }
-    for (const k of Object.keys(map)) map[k].sort((a, b) => a.name.localeCompare(b.name));
-    return map;
-  }, [filteredProducts]);
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("__all__");
 
   const [clientName, setClientName] = useState("");
-  const [quantity, setQuantity] = useState(1);
-  const [dueDate, setDueDate] = useState("");
   const [customCode, setCustomCode] = useState("");
-
-  const computedType = useMemo(() => getOrderType(Number(quantity || 0)), [quantity]);
+  const [dueDate, setDueDate] = useState(""); // opcional: si lo dejan vacío, se calcula por lead time
+  const [cart, setCart] = useState<CartItem[]>([]);
 
   useEffect(() => {
     init();
@@ -117,12 +83,10 @@ export default function NewOrderPage() {
   const init = async () => {
     setLoading(true);
     setErrorMsg("");
-
     try {
       const ures = await supabase.auth.getUser();
       const u = ures.data.user ?? null;
       setUser(u);
-
       if (!u) {
         window.location.href = "/login";
         return;
@@ -132,6 +96,7 @@ export default function NewOrderPage() {
       const r = (pres.data?.role ?? null) as Role;
       setRole(r);
 
+      // Solo admin/supervisor crean órdenes
       if (r !== "admin" && r !== "supervisor") {
         window.location.href = "/";
         return;
@@ -139,19 +104,112 @@ export default function NewOrderPage() {
 
       const res = await supabase
         .from(PRODUCTS_TABLE)
-        .select("id, sku, name, image_path, is_active, category, base_price, lead_time_days")
+        .select("id, sku, name, category, image_path, is_active, lead_time_days")
+        .eq("is_active", true)
         .order("category", { ascending: true })
         .order("name", { ascending: true });
 
       if (res.error) throw res.error;
 
-      setProducts((res.data ?? []) as Product[]);
+      const data = (res.data ?? []) as any[];
+      // Asegurar category y lead_time_days
+      const normalized: Product[] = data.map((p) => ({
+        id: p.id,
+        sku: p.sku ?? null,
+        name: p.name,
+        category: normCat(p.category),
+        image_path: p.image_path,
+        is_active: !!p.is_active,
+        lead_time_days: Number(p.lead_time_days ?? 0),
+      }));
+      setProducts(normalized);
     } catch (e: any) {
       setErrorMsg(e?.message ?? String(e));
     } finally {
       setLoading(false);
     }
   };
+
+  const categories = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of products) set.add(p.category);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [products]);
+
+  const filteredProducts = useMemo(() => {
+    const s = search.trim().toLowerCase();
+    return products.filter((p) => {
+      if (categoryFilter !== "__all__" && p.category !== categoryFilter) return false;
+      if (!s) return true;
+      const hay = `${p.name} ${p.sku ?? ""} ${p.category}`.toLowerCase();
+      return hay.includes(s);
+    });
+  }, [products, search, categoryFilter]);
+
+  const groupedProducts = useMemo(() => {
+    const map: Record<string, Product[]> = {};
+    for (const p of filteredProducts) {
+      if (!map[p.category]) map[p.category] = [];
+      map[p.category].push(p);
+    }
+    return map;
+  }, [filteredProducts]);
+
+  const addToCart = (p: Product) => {
+    if (!p.image_path || !isValidHttpUrl(p.image_path)) {
+      alert("Este producto no tiene foto válida (es obligatoria).");
+      return;
+    }
+    if (!p.category || p.category.trim() === "") {
+      alert("Este producto no tiene categoría. Corrígelo en Catálogo.");
+      return;
+    }
+    if (!Number.isFinite(p.lead_time_days)) {
+      alert("Este producto no tiene lead_time_days válido.");
+      return;
+    }
+
+    setCart((prev) => {
+      const idx = prev.findIndex((x) => x.product_id === p.id);
+      if (idx >= 0) {
+        const copy = [...prev];
+        copy[idx] = { ...copy[idx], qty: copy[idx].qty + 1 };
+        return copy;
+      }
+      return [
+        ...prev,
+        {
+          product_id: p.id,
+          sku: p.sku,
+          name: p.name,
+          category: p.category,
+          image_path: p.image_path,
+          lead_time_days: p.lead_time_days,
+          qty: 1,
+        },
+      ];
+    });
+  };
+
+  const removeFromCart = (product_id: string) => {
+    setCart((prev) => prev.filter((x) => x.product_id !== product_id));
+  };
+
+  const setQty = (product_id: string, qty: number) => {
+    if (!qty || qty < 1) qty = 1;
+    setCart((prev) => prev.map((x) => (x.product_id === product_id ? { ...x, qty } : x)));
+  };
+
+  const totalQty = useMemo(() => cart.reduce((a, b) => a + b.qty, 0), [cart]);
+
+  const orderType = useMemo(() => (totalQty >= 20 ? "produccion" : "venta"), [totalQty]);
+
+  const computedDueDate = useMemo(() => {
+    if (dueDate) return dueDate;
+    const maxLead = cart.length ? Math.max(...cart.map((x) => x.lead_time_days || 0)) : 0;
+    const d = addDays(new Date(), maxLead);
+    return d.toISOString().slice(0, 10);
+  }, [dueDate, cart]);
 
   const generateAutoCode = async () => {
     const year = new Date().getFullYear();
@@ -176,55 +234,30 @@ export default function NewOrderPage() {
     return `${prefix}${pad(num + 1)}`;
   };
 
-  const clearSelected = () => {
-    setSelectedProductId("");
-  };
-
   const createOrder = async () => {
     setErrorMsg("");
-
     if (!user?.id) return alert("No hay usuario autenticado.");
     if (!clientName.trim()) return alert("Falta cliente.");
-    if (!selectedProduct) return alert("Selecciona un producto del catálogo.");
-
-    // Foto obligatoria
-    if (!selectedProduct.image_path) return alert("Este producto no tiene foto (es obligatoria).");
-    if (!isValidHttpUrl(selectedProduct.image_path)) return alert("La foto del producto debe ser una URL http(s).");
-
-    // Categoría obligatoria (por si quedó algún producto viejo sin categoría)
-    if (!selectedProduct.category || !selectedProduct.category.trim()) return alert("El producto no tiene categoría. Edita el catálogo.");
-
-    const qty = Number(quantity);
-    if (!qty || qty <= 0) return alert("Cantidad inválida.");
+    if (cart.length === 0) return alert("Agrega al menos 1 artículo.");
 
     setSaving(true);
-
     try {
       const code = customCode.trim() ? customCode.trim() : await generateAutoCode();
 
-      const productRef =
-        selectedProduct.sku && selectedProduct.sku.trim() ? selectedProduct.sku.trim() : selectedProduct.name;
-
+      // Crear orden (cabecera)
       const insOrder = await supabase
         .from(ORDERS_TABLE)
         .insert({
           created_by: user.id,
-
           display_code_manual: code,
           seq_code: code,
-          product_ref: productRef,
-
-          order_type: computedType,
+          product_ref: "MULTI", // ya no es 1 producto
+          order_type: orderType,
           status: "active",
           current_stage: "venta",
-
-          product_id: selectedProduct.id,
-          product_name: selectedProduct.name,
-          product_image_path: selectedProduct.image_path,
-
-          quantity: qty,
+          quantity: totalQty,
           client_name: clientName.trim(),
-          due_date: dueDate || null,
+          due_date: computedDueDate || null,
         })
         .select("id")
         .single();
@@ -233,6 +266,22 @@ export default function NewOrderPage() {
 
       const orderId = insOrder.data.id as string;
 
+      // Insertar items
+      const itemsPayload = cart.map((x) => ({
+        order_id: orderId,
+        product_id: x.product_id,
+        product_name: x.name,
+        product_image_path: x.image_path,
+        category: x.category,
+        sku: x.sku,
+        qty: x.qty,
+        lead_time_days: x.lead_time_days ?? 0,
+      }));
+
+      const insItems = await supabase.from(ORDER_ITEMS_TABLE).insert(itemsPayload);
+      if (insItems.error) throw insItems.error;
+
+      // Crear etapas
       const now = new Date().toISOString();
       const stageRows = STAGES.map((s) => ({
         order_id: orderId,
@@ -250,7 +299,7 @@ export default function NewOrderPage() {
       window.location.href = `/orders/${orderId}`;
     } catch (e: any) {
       setErrorMsg(e?.message ?? String(e));
-      alert("Error creando: " + (e?.message ?? String(e)));
+      alert("Error creando orden: " + (e?.message ?? String(e)));
     } finally {
       setSaving(false);
     }
@@ -265,12 +314,13 @@ export default function NewOrderPage() {
           <div>
             <h1 className="text-2xl font-bold">Crear Orden</h1>
             <div className="text-sm text-gray-600">
-              Tipo automático por cantidad: <b>{computedType.toUpperCase()}</b>
+              Tipo: <b>{orderType.toUpperCase()}</b> · Cantidad total: <b>{totalQty}</b> · Entrega sugerida:{" "}
+              <b>{computedDueDate || "-"}</b>
             </div>
           </div>
 
           <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/")}>
-            ← Volver al tablero
+            ← Volver
           </button>
         </div>
 
@@ -280,150 +330,94 @@ export default function NewOrderPage() {
           </div>
         )}
 
-        <div className="mt-4 grid gap-4 md:grid-cols-[1fr_420px] items-start">
-          {/* Formulario */}
+        <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_420px] items-start">
+          {/* Datos orden */}
           <div className="bg-white border rounded-2xl p-4">
             <div className="grid gap-3">
-              <input
-                className="border p-3 rounded-xl w-full"
-                placeholder="Cliente"
-                value={clientName}
-                onChange={(e) => setClientName(e.target.value)}
-              />
+              <input className="border p-3 rounded-xl w-full" placeholder="Cliente" value={clientName} onChange={(e) => setClientName(e.target.value)} />
+              <input className="border p-3 rounded-xl w-full" placeholder="Consecutivo personalizado (opcional)" value={customCode} onChange={(e) => setCustomCode(e.target.value)} />
 
               <div className="grid md:grid-cols-2 gap-3">
-                <input
-                  type="number"
-                  min={1}
-                  className="border p-3 rounded-xl w-full"
-                  value={quantity}
-                  onChange={(e) => setQuantity(Number(e.target.value))}
-                />
-
                 <input
                   type="date"
                   className="border p-3 rounded-xl w-full"
                   value={dueDate}
                   onChange={(e) => setDueDate(e.target.value)}
                 />
+                <div className="text-xs text-gray-500 flex items-center">
+                  Si lo dejas vacío, se calcula con el mayor lead_time_days del carrito.
+                </div>
               </div>
 
-              <input
-                className="border p-3 rounded-xl w-full"
-                placeholder="Consecutivo personalizado (opcional)"
-                value={customCode}
-                onChange={(e) => setCustomCode(e.target.value)}
-              />
-
-              <button
-                className="bg-black text-white px-4 py-3 rounded-xl w-full disabled:opacity-50"
-                disabled={saving}
-                onClick={createOrder}
-              >
+              <button className="bg-black text-white px-4 py-3 rounded-xl w-full disabled:opacity-50" disabled={saving} onClick={createOrder}>
                 {saving ? "Creando..." : "Crear Orden"}
               </button>
             </div>
           </div>
 
-          {/* Selector por categorías */}
+          {/* Selector productos por categorías */}
           <div className="bg-white border rounded-2xl p-4">
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-lg font-semibold">Producto</div>
-              {selectedProduct && (
-                <button className="text-sm underline" onClick={clearSelected} disabled={saving}>
-                  Cambiar
-                </button>
+            <div className="text-lg font-semibold">Agregar artículos</div>
+
+            <div className="mt-3 grid gap-2">
+              <input className="border p-3 rounded-xl w-full" placeholder="Buscar..." value={search} onChange={(e) => setSearch(e.target.value)} />
+              <select className="border p-3 rounded-xl w-full" value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)}>
+                <option value="__all__">Todas las categorías</option>
+                {categories.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="mt-3 max-h-[420px] overflow-auto pr-1 space-y-5">
+              {Object.keys(groupedProducts).sort((a, b) => a.localeCompare(b)).map((cat) => (
+                <div key={cat}>
+                  <div className="font-bold">{cat}</div>
+                  <div className="mt-2 grid gap-2">
+                    {groupedProducts[cat].map((p) => (
+                      <button key={p.id} className="border rounded-xl p-2 text-left hover:bg-gray-50" onClick={() => addToCart(p)}>
+                        <div className="font-semibold">{p.name}</div>
+                        <div className="text-xs text-gray-600">SKU: {p.sku ?? "-"} · Lead time: {p.lead_time_days} días</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {filteredProducts.length === 0 && <div className="text-sm text-gray-500">No hay productos con ese filtro.</div>}
+            </div>
+
+            {/* Carrito */}
+            <div className="mt-4 border-t pt-3">
+              <div className="font-semibold">Carrito ({totalQty})</div>
+              {cart.length === 0 ? (
+                <div className="text-sm text-gray-500 mt-2">Aún no has agregado artículos.</div>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  {cart.map((x) => (
+                    <div key={x.product_id} className="border rounded-xl p-2 bg-white">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-semibold truncate">{x.name}</div>
+                          <div className="text-xs text-gray-600">Categoría: {x.category} · Lead: {x.lead_time_days} días</div>
+                        </div>
+                        <button className="text-sm underline" onClick={() => removeFromCart(x.product_id)}>Quitar</button>
+                      </div>
+                      <div className="mt-2 flex items-center gap-2">
+                        <span className="text-xs text-gray-600">Cant:</span>
+                        <input
+                          type="number"
+                          min={1}
+                          className="border rounded-lg px-2 py-1 w-24"
+                          value={x.qty}
+                          onChange={(e) => setQty(x.product_id, Number(e.target.value))}
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
 
-            {!selectedProduct ? (
-              <>
-                <div className="mt-3 grid gap-2">
-                  <input
-                    className="border p-3 rounded-xl w-full"
-                    placeholder="Buscar por nombre, SKU o categoría..."
-                    value={searchProduct}
-                    onChange={(e) => setSearchProduct(e.target.value)}
-                  />
-
-                  <select
-                    className="border p-3 rounded-xl w-full"
-                    value={categoryFilter}
-                    onChange={(e) => setCategoryFilter(e.target.value)}
-                  >
-                    <option value="__all__">Todas las categorías</option>
-                    {categories.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="mt-3 space-y-5 max-h-[520px] overflow-auto pr-1">
-                  {Object.keys(groupedProducts)
-                    .sort((a, b) => a.localeCompare(b))
-                    .map((cat) => (
-                      <div key={cat}>
-                        <div className="flex items-center justify-between">
-                          <div className="font-bold">{cat}</div>
-                          <span className="text-xs px-2 py-1 rounded-full border bg-white">
-                            {groupedProducts[cat].length}
-                          </span>
-                        </div>
-
-                        <div className="mt-2 grid gap-2">
-                          {groupedProducts[cat].map((p) => (
-                            <button
-                              key={p.id}
-                              className="border rounded-xl p-2 text-left hover:bg-gray-50"
-                              onClick={() => setSelectedProductId(p.id)}
-                            >
-                              <div className="font-semibold">{p.name}</div>
-                              <div className="text-xs text-gray-600">
-                                SKU: {p.sku ?? "-"} · {money(p.base_price)} · {p.lead_time_days ?? "-"} días
-                              </div>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-
-                  {filteredProducts.length === 0 && (
-                    <div className="text-sm text-gray-500">No hay productos con ese filtro.</div>
-                  )}
-                </div>
-
-                <div className="text-xs text-gray-500 mt-3">
-                  * Solo se muestran productos <b>activos</b> y con foto.
-                </div>
-              </>
-            ) : (
-              <div className="mt-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={selectedProduct.image_path ?? ""}
-                  alt={selectedProduct.name}
-                  className="w-full h-44 object-cover rounded-xl border"
-                />
-
-                <div className="mt-3">
-                  <div className="text-lg font-bold">{selectedProduct.name}</div>
-                  <div className="text-sm text-gray-700">
-                    Categoría: <b>{selectedProduct.category}</b>
-                  </div>
-                  <div className="text-sm text-gray-700">
-                    SKU: <b>{selectedProduct.sku ?? "-"}</b>
-                  </div>
-                  <div className="text-sm text-gray-700">
-                    Precio base: <b>{money(selectedProduct.base_price)}</b>
-                  </div>
-                  <div className="text-sm text-gray-700">
-                    Días estimados: <b>{selectedProduct.lead_time_days ?? "-"}</b>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div>
       </div>
