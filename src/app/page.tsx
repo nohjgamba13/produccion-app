@@ -1,13 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { useParams } from "next/navigation";
+import { supabase } from "../../../lib/supabaseClient";
 
 type Role = "admin" | "supervisor" | "operator" | null;
 
 const PROFILES_TABLE = "profiles";
 const ORDERS_TABLE = "ordenes_de_produccion";
 const ITEMS_TABLE = "orden_items";
+const STAGES_TABLE = "etapas_de_produccion";
+
+const EVIDENCES_BUCKET = "evidences"; // ✅ si tu bucket se llama distinto, cámbialo aquí
 
 const STAGES = ["venta", "diseno", "estampado", "confeccion", "revision_calidad", "despacho"] as const;
 
@@ -19,6 +23,12 @@ const STAGE_LABEL: Record<(typeof STAGES)[number], string> = {
   revision_calidad: "Revisión y calidad",
   despacho: "Despacho",
 };
+
+const STAGE_STATUS = {
+  PENDING: "pending",
+  IN_PROGRESS: "in_progress",
+  APPROVED: "approved",
+} as const;
 
 type OrderRow = {
   id: string;
@@ -33,11 +43,26 @@ type OrderRow = {
 };
 
 type OrderItemRow = {
+  id: number;
   order_id: string;
+  product_id: string | null;
   product_name: string;
-  category: string;
-  qty: number;
   product_image_path: string;
+  category: string;
+  sku: string | null;
+  qty: number;
+  lead_time_days: number;
+  created_at: string;
+};
+
+type StageRow = {
+  order_id: string;
+  stage: string;
+  status: string;
+  started_at: string | null;
+  approved_at: string | null;
+  evidence_url: string | null;
+  notes: string | null;
 };
 
 function fmtDate(iso?: string | null) {
@@ -65,7 +90,6 @@ function daysUntil(due?: string | null) {
   }
 }
 
-// PASO 4: semáforo
 function dueBadge(due?: string | null, status?: string | null) {
   if ((status ?? "").toLowerCase() === "completed") return { label: "Completada", cls: "bg-green-100 text-green-800" };
   const d = daysUntil(due);
@@ -76,41 +100,54 @@ function dueBadge(due?: string | null, status?: string | null) {
   return { label: `En tiempo (${d}d)`, cls: "bg-emerald-100 text-emerald-800" };
 }
 
-// PASO 5: orden urgente primero
-function urgencyKey(o: OrderRow) {
-  // menor = más urgente
-  const st = (o.status ?? "").toLowerCase();
-  if (st === "completed") return 999999; // al final
-  const d = daysUntil(o.due_date);
-  if (d === null) return 500000; // sin fecha después de las urgentes
-  return d; // vencidas (<0) quedan primero
+function isValidHttpUrl(u?: string | null) {
+  return !!u && /^https?:\/\//i.test(u);
 }
 
-export default function HomePage() {
+function nextStage(stage: string | null) {
+  const i = STAGES.findIndex((s) => s === stage);
+  if (i < 0) return null;
+  if (i === STAGES.length - 1) return null;
+  return STAGES[i + 1];
+}
+
+export default function OrderDetailPage() {
+  const params = useParams<{ id: string }>();
+  const orderId = params?.id;
+
   const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
 
   const [user, setUser] = useState<any>(null);
   const [role, setRole] = useState<Role>(null);
-
-  // Etapa asignada al operario (PASO 1)
   const [myStage, setMyStage] = useState<string | null>(null);
 
-  const [orders, setOrders] = useState<OrderRow[]>([]);
+  const [order, setOrder] = useState<OrderRow | null>(null);
   const [items, setItems] = useState<OrderItemRow[]>([]);
+  const [stages, setStages] = useState<StageRow[]>([]);
+
+  // evidencias / notas
+  const [uploadingStage, setUploadingStage] = useState<string | null>(null);
+  const [fileByStage, setFileByStage] = useState<Record<string, File | null>>({});
+  const [notesByStage, setNotesByStage] = useState<Record<string, string>>({});
 
   useEffect(() => {
     init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [orderId]);
 
   const init = async () => {
+    if (!orderId) return;
+
     setLoading(true);
     setErrorMsg("");
+
     try {
       const ures = await supabase.auth.getUser();
       const u = ures.data.user ?? null;
       setUser(u);
+
       if (!u) {
         window.location.href = "/login";
         return;
@@ -120,7 +157,6 @@ export default function HomePage() {
       const r = (pres.data?.role ?? null) as Role;
       setRole(r);
 
-      // obtener etapa del operario (si aplica)
       if (r === "operator") {
         const st = await supabase.rpc("user_stage", { uid: u.id });
         setMyStage((st.data ?? null) as string | null);
@@ -128,7 +164,7 @@ export default function HomePage() {
         setMyStage(null);
       }
 
-      await loadData(r, u.id);
+      await loadAll(r, u.id);
     } catch (e: any) {
       setErrorMsg(e?.message ?? String(e));
     } finally {
@@ -136,119 +172,264 @@ export default function HomePage() {
     }
   };
 
-  const loadData = async (r?: Role, uid?: string) => {
+  const loadAll = async (r?: Role, uid?: string) => {
     setErrorMsg("");
 
-    // Cargar órdenes
-    const ordRes = await supabase
+    const o = await supabase
       .from(ORDERS_TABLE)
       .select("id, display_code_manual, order_type, status, current_stage, client_name, due_date, created_at, quantity")
-      // PASO 5: en UI ordenamos por urgencia, aquí traemos bastante data
-      .limit(500);
+      .eq("id", orderId)
+      .single();
 
-    if (ordRes.error) {
-      setErrorMsg("Error cargando órdenes: " + ordRes.error.message);
-      setOrders([]);
-      setItems([]);
+    if (o.error) {
+      setErrorMsg("No pude cargar la orden: " + o.error.message);
+      setOrder(null);
       return;
     }
+    setOrder(o.data as OrderRow);
 
-    let ord = (ordRes.data ?? []) as OrderRow[];
-
-    // PASO 1: filtrar visibilidad
-    if (r === "operator") {
-      const st = await supabase.rpc("user_stage", { uid: uid });
-      const stage = (st.data ?? null) as string | null;
-
-      // operario ve SOLO órdenes cuya etapa actual es su etapa
-      ord = ord.filter((o) => (o.current_stage ?? "") === (stage ?? ""));
-    }
-
-    // PASO 5: ordenar más urgente primero (vencidas, por vencer, etc) + más antiguas primero
-    ord.sort((a, b) => {
-      const ka = urgencyKey(a);
-      const kb = urgencyKey(b);
-      if (ka !== kb) return ka - kb;
-      const ca = a.created_at ? new Date(a.created_at).getTime() : 0;
-      const cb = b.created_at ? new Date(b.created_at).getTime() : 0;
-      return ca - cb;
-    });
-
-    setOrders(ord);
-
-    // Cargar items de esas órdenes (para mostrar resumen)
-    const ids = ord.map((o) => o.id);
-    if (ids.length === 0) {
-      setItems([]);
-      return;
-    }
-
-    const itRes = await supabase
+    const it = await supabase
       .from(ITEMS_TABLE)
-      .select("order_id, product_name, category, qty, product_image_path")
-      .in("order_id", ids);
+      .select("id, order_id, product_id, product_name, product_image_path, category, sku, qty, lead_time_days, created_at")
+      .eq("order_id", orderId)
+      .order("category", { ascending: true })
+      .order("created_at", { ascending: true });
 
-    if (itRes.error) {
-      setErrorMsg("Error cargando items: " + itRes.error.message);
+    if (it.error) {
+      setErrorMsg("No pude cargar items: " + it.error.message);
       setItems([]);
-      return;
+    } else {
+      setItems((it.data ?? []) as OrderItemRow[]);
     }
 
-    setItems((itRes.data ?? []) as OrderItemRow[]);
+    const st = await supabase
+      .from(STAGES_TABLE)
+      .select("order_id, stage, status, started_at, approved_at, evidence_url, notes")
+      .eq("order_id", orderId);
+
+    if (st.error) {
+      setErrorMsg("No pude cargar etapas: " + st.error.message);
+      setStages([]);
+    } else {
+      // ordenar por el orden real de etapas
+      const rows = (st.data ?? []) as StageRow[];
+      rows.sort((a, b) => STAGES.indexOf(a.stage as any) - STAGES.indexOf(b.stage as any));
+      setStages(rows);
+
+      // precargar notas
+      const map: Record<string, string> = {};
+      for (const s of rows) map[s.stage] = s.notes ?? "";
+      setNotesByStage(map);
+    }
+
+    // Visibilidad por rol (operario solo su módulo)
+    if (r === "operator") {
+      const stg = await supabase.rpc("user_stage", { uid });
+      const stage = (stg.data ?? null) as string | null;
+      setMyStage(stage);
+    }
   };
 
-  const itemsByOrder = useMemo(() => {
+  const itemsGrouped = useMemo(() => {
     const map: Record<string, OrderItemRow[]> = {};
     for (const it of items) {
-      if (!map[it.order_id]) map[it.order_id] = [];
-      map[it.order_id].push(it);
+      const c = (it.category ?? "").trim() || "Sin categoría";
+      if (!map[c]) map[c] = [];
+      map[c].push(it);
     }
     return map;
   }, [items]);
 
-  const canCreate = role === "admin" || role === "supervisor";
+  const visibleStages = useMemo(() => {
+    if (role === "admin" || role === "supervisor") return stages;
+    if (role === "operator") {
+      return stages.filter((s) => s.stage === myStage);
+    }
+    return [];
+  }, [stages, role, myStage]);
 
-  const openOrder = (id: string) => {
-    window.location.href = `/orders/${id}`;
+  const canSeeAll = role === "admin" || role === "supervisor";
+
+  const canApproveStage = async (stageName: string) => {
+    if (!user?.id) return false;
+    const res = await supabase.rpc("can_approve_stage", { uid: user.id, st: stageName });
+    return !!res.data;
   };
 
-  if (loading) return <div className="p-6">Cargando...</div>;
+  const uploadEvidence = async (stageName: string) => {
+    setErrorMsg("");
+    const file = fileByStage[stageName];
+    if (!file) return alert("Selecciona un archivo primero.");
+
+    setUploadingStage(stageName);
+
+    try {
+      const ext = file.name.split(".").pop() || "jpg";
+      const safe = `${orderId}/${stageName}-${Date.now()}.${ext}`;
+
+      const up = await supabase.storage.from(EVIDENCES_BUCKET).upload(safe, file, { upsert: true });
+      if (up.error) throw up.error;
+
+      const pub = supabase.storage.from(EVIDENCES_BUCKET).getPublicUrl(safe);
+      const url = pub.data.publicUrl;
+      if (!url) throw new Error("No se pudo obtener URL pública del archivo.");
+
+      // Guardar URL en la etapa
+      const upd = await supabase
+        .from(STAGES_TABLE)
+        .update({ evidence_url: url })
+        .eq("order_id", orderId)
+        .eq("stage", stageName);
+
+      if (upd.error) throw upd.error;
+
+      await loadAll(role, user?.id);
+      alert("✅ Evidencia subida.");
+    } catch (e: any) {
+      alert("❌ Error subiendo evidencia: " + (e?.message ?? String(e)));
+    } finally {
+      setUploadingStage(null);
+    }
+  };
+
+  const saveNotes = async (stageName: string) => {
+    setSaving(true);
+    try {
+      const upd = await supabase
+        .from(STAGES_TABLE)
+        .update({ notes: notesByStage[stageName] ?? "" })
+        .eq("order_id", orderId)
+        .eq("stage", stageName);
+
+      if (upd.error) throw upd.error;
+
+      await loadAll(role, user?.id);
+      alert("✅ Notas guardadas.");
+    } catch (e: any) {
+      alert("❌ Error guardando notas: " + (e?.message ?? String(e)));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const approve = async (stageName: string) => {
+    if (!order) return;
+
+    setErrorMsg("");
+    setSaving(true);
+
+    try {
+      const ok = await canApproveStage(stageName);
+      if (!ok) {
+        alert("No tienes permiso para aprobar esta etapa.");
+        return;
+      }
+
+      const now = new Date().toISOString();
+
+      // Reglas especiales: Revisión y calidad -> solo check (sin evidencia obligatoria)
+      // Para otras etapas, si quieres evidencia obligatoria, activa esta validación:
+      // if (stageName !== "revision_calidad") { ... }
+      // (Lo dejo flexible: si quieres, lo hacemos obligatorio luego.)
+      const stageRow = stages.find((s) => s.stage === stageName);
+      if (!stageRow) throw new Error("No se encontró la etapa.");
+
+      // 1) Aprobar etapa
+      const updStage = await supabase
+        .from(STAGES_TABLE)
+        .update({ status: STAGE_STATUS.APPROVED, approved_at: now })
+        .eq("order_id", orderId)
+        .eq("stage", stageName);
+
+      if (updStage.error) throw updStage.error;
+
+      // 2) Activar siguiente etapa
+      const nxt = nextStage(stageName);
+      if (nxt) {
+        const updNext = await supabase
+          .from(STAGES_TABLE)
+          .update({ status: STAGE_STATUS.IN_PROGRESS, started_at: now })
+          .eq("order_id", orderId)
+          .eq("stage", nxt)
+          .eq("status", STAGE_STATUS.PENDING);
+
+        // si falla porque ya estaba in_progress, no es grave
+        if (updNext.error) {
+          // seguimos, pero no explotamos
+          console.warn("No pude activar siguiente etapa:", updNext.error.message);
+        }
+
+        // 3) Actualizar current_stage de la orden
+        const updOrder = await supabase
+          .from(ORDERS_TABLE)
+          .update({ current_stage: nxt })
+          .eq("id", orderId);
+
+        if (updOrder.error) throw updOrder.error;
+      } else {
+        // Última etapa -> marcar completada
+        const updOrder = await supabase
+          .from(ORDERS_TABLE)
+          .update({ status: "completed", current_stage: "despacho" })
+          .eq("id", orderId);
+
+        if (updOrder.error) throw updOrder.error;
+      }
+
+      await loadAll(role, user?.id);
+      alert("✅ Etapa aprobada.");
+    } catch (e: any) {
+      alert("❌ Error aprobando: " + (e?.message ?? String(e)));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) return <div className="p-6">Cargando orden...</div>;
+  if (!order) return <div className="p-6">No se pudo cargar la orden.</div>;
+
+  const badge = dueBadge(order.due_date, order.status);
 
   return (
     <main className="min-h-screen bg-gray-100 p-4">
-      <div className="max-w-7xl mx-auto">
+      <div className="max-w-6xl mx-auto">
+        {/* Header */}
         <div className="bg-white border rounded-2xl p-4">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
-              <div className="text-2xl font-bold">Tablero</div>
+              <div className="text-2xl font-bold">{order.display_code_manual ?? "(sin consecutivo)"}</div>
               <div className="text-sm text-gray-600">
-                Usuario: <b>{user?.email ?? "-"}</b> — Rol: <b>{role ?? "sin rol"}</b>
-                {role === "operator" && (
-                  <>
-                    {" "}
-                    — Módulo: <b>{STAGE_LABEL[(myStage as any) ?? "venta"] ?? myStage ?? "sin asignar"}</b>
-                  </>
-                )}
+                Cliente: <b>{order.client_name ?? "-"}</b> · Tipo: <b>{String(order.order_type ?? "-").toUpperCase()}</b>
               </div>
+              <div className="text-sm text-gray-600">
+                Etapa actual: <b>{STAGE_LABEL[(order.current_stage as any) ?? "venta"] ?? order.current_stage ?? "-"}</b> ·
+                Cantidad total: <b>{order.quantity ?? "-"}</b>
+              </div>
+
+              <div className="mt-2 flex items-center gap-2">
+                <span className={`text-xs px-2 py-1 rounded-full ${badge.cls}`}>{badge.label}</span>
+                <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                  Entrega: <b>{fmtDate(order.due_date)}</b>
+                </span>
+                <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                  Creada: <b>{fmtDate(order.created_at)}</b>
+                </span>
+              </div>
+
+              {role === "operator" && (
+                <div className="text-xs text-gray-500 mt-2">
+                  Estás viendo solo tu módulo: <b>{STAGE_LABEL[(myStage as any) ?? "venta"] ?? myStage ?? "sin asignar"}</b>
+                </div>
+              )}
             </div>
 
             <div className="flex gap-2 flex-wrap">
-              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => loadData(role, user?.id)}>
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/")}>
+                ← Volver
+              </button>
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => loadAll(role, user?.id)}>
                 Recargar
               </button>
-              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/catalog")}>
-                Catálogo
-              </button>
-              {(role === "admin") && (
-                <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/admin/users")}>
-                  Usuarios/Roles
-                </button>
-              )}
-              {canCreate && (
-                <button className="px-3 py-2 rounded-xl bg-black text-white" onClick={() => (window.location.href = "/orders/new")}>
-                  + Crear orden
-                </button>
-              )}
             </div>
           </div>
 
@@ -259,65 +440,172 @@ export default function HomePage() {
           )}
         </div>
 
-        {/* Lista ordenada por urgencia (PASO 5) */}
-        <div className="mt-4 grid gap-3">
-          {orders.map((o) => {
-            const badge = dueBadge(o.due_date, o.status);
-            const its = itemsByOrder[o.id] ?? [];
-            const first = its[0];
-            const restCount = Math.max(0, its.length - 1);
+        {/* Items (multi-producto) */}
+        <div className="mt-4 bg-white border rounded-2xl p-4">
+          <div className="text-lg font-semibold">Artículos de la orden</div>
 
-            return (
-              <button
-                key={o.id}
-                onClick={() => openOrder(o.id)}
-                className="w-full text-left bg-white border rounded-2xl p-4 hover:bg-gray-50"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0">
-                    <div className="font-bold truncate">{o.display_code_manual ?? "(sin consecutivo)"}</div>
-                    <div className="text-sm text-gray-600 truncate">
-                      Cliente: <b>{o.client_name ?? "-"}</b> · Etapa: <b>{STAGE_LABEL[(o.current_stage as any) ?? "venta"] ?? o.current_stage ?? "-"}</b>
+          {Object.keys(itemsGrouped).length === 0 ? (
+            <div className="text-sm text-gray-500 mt-2">Esta orden no tiene artículos.</div>
+          ) : (
+            <div className="mt-3 space-y-6">
+              {Object.keys(itemsGrouped)
+                .sort((a, b) => a.localeCompare(b))
+                .map((cat) => (
+                  <div key={cat}>
+                    <div className="flex items-center justify-between">
+                      <div className="font-bold">{cat}</div>
+                      <span className="text-xs px-2 py-1 rounded-full border bg-white">{itemsGrouped[cat].length}</span>
+                    </div>
+
+                    <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {itemsGrouped[cat].map((it) => (
+                        <div key={it.id} className="border rounded-2xl overflow-hidden bg-white">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={it.product_image_path}
+                            alt={it.product_name}
+                            className="w-full h-28 object-cover border-b"
+                          />
+                          <div className="p-3">
+                            <div className="font-semibold">{it.product_name}</div>
+                            <div className="text-xs text-gray-600">SKU: {it.sku ?? "-"}</div>
+                            <div className="text-xs text-gray-600">
+                              Cantidad: <b>{it.qty}</b> · Lead time: <b>{it.lead_time_days} días</b>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-
-                  <div className="flex items-center gap-2 shrink-0">
-                    <span className={`text-xs px-2 py-1 rounded-full ${badge.cls}`}>{badge.label}</span>
-                    <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
-                      {String(o.order_type ?? "-").toUpperCase()}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="mt-3 flex items-center gap-3">
-                  {first?.product_image_path ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={first.product_image_path} alt="Producto" className="w-12 h-12 rounded-xl object-cover border" />
-                  ) : (
-                    <div className="w-12 h-12 rounded-xl border bg-gray-100" />
-                  )}
-
-                  <div className="min-w-0">
-                    <div className="text-sm font-semibold truncate">
-                      {its.length === 0 ? "Sin items" : `${first.product_name}${restCount ? ` + ${restCount} más` : ""}`}
-                    </div>
-                    <div className="text-xs text-gray-600">
-                      Cant. total: <b>{o.quantity ?? "-"}</b> · Entrega: <b>{fmtDate(o.due_date)}</b> · Creada: <b>{fmtDate(o.created_at)}</b>
-                    </div>
-                  </div>
-                </div>
-              </button>
-            );
-          })}
-
-          {orders.length === 0 && (
-            <div className="text-sm text-gray-500 bg-white border rounded-2xl p-4">
-              No hay órdenes para mostrar en tu módulo.
+                ))}
             </div>
           )}
+        </div>
+
+        {/* Etapas */}
+        <div className="mt-4 bg-white border rounded-2xl p-4">
+          <div className="text-lg font-semibold">Etapas</div>
+
+          {!canSeeAll && (
+            <div className="text-xs text-gray-500 mt-1">
+              * Como operario, solo ves tu etapa asignada.
+            </div>
+          )}
+
+          <div className="mt-3 space-y-3">
+            {visibleStages.map((s) => {
+              const isCurrent = (order.current_stage ?? "") === s.stage;
+              const stageName = s.stage as (typeof STAGES)[number] | string;
+
+              const statusPill =
+                s.status === STAGE_STATUS.APPROVED
+                  ? "bg-green-100 text-green-800"
+                  : s.status === STAGE_STATUS.IN_PROGRESS
+                  ? "bg-blue-100 text-blue-800"
+                  : "bg-gray-100 text-gray-700";
+
+              const canAttemptApprove = isCurrent; // UI: solo aprobar si está activa
+
+              return (
+                <div key={s.stage} className="border rounded-2xl p-4 bg-white">
+                  <div className="flex items-start justify-between gap-3 flex-wrap">
+                    <div>
+                      <div className="font-bold text-lg">
+                        {STAGE_LABEL[(stageName as any) ?? "venta"] ?? stageName}
+                        {isCurrent && <span className="ml-2 text-xs px-2 py-1 rounded-full bg-black text-white">Actual</span>}
+                      </div>
+
+                      <div className="mt-1 flex items-center gap-2 flex-wrap">
+                        <span className={`text-xs px-2 py-1 rounded-full ${statusPill}`}>{String(s.status).toUpperCase()}</span>
+                        <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                          Inicio: <b>{fmtDate(s.started_at)}</b>
+                        </span>
+                        <span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">
+                          Aprobación: <b>{fmtDate(s.approved_at)}</b>
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex gap-2 flex-wrap">
+                      {/* Aprobar */}
+                      <button
+                        className="px-3 py-2 rounded-xl bg-black text-white disabled:opacity-50"
+                        disabled={saving || !canAttemptApprove}
+                        onClick={() => approve(stageName)}
+                        title={!canAttemptApprove ? "Solo puedes aprobar la etapa actual" : "Aprobar etapa"}
+                      >
+                        {saving ? "Procesando..." : "Aprobar etapa"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Evidencia */}
+                  <div className="mt-3 grid gap-2">
+                    <div className="text-sm font-semibold">Evidencia</div>
+
+                    {s.evidence_url ? (
+                      <a className="text-sm underline" href={s.evidence_url} target="_blank" rel="noreferrer">
+                        Ver evidencia
+                      </a>
+                    ) : (
+                      <div className="text-sm text-gray-500">Sin evidencia</div>
+                    )}
+
+                    {/* Upload (solo si es etapa actual y el usuario la ve) */}
+                    {isCurrent && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <input
+                          type="file"
+                          onChange={(e) =>
+                            setFileByStage((prev) => ({ ...prev, [stageName]: e.target.files?.[0] ?? null }))
+                          }
+                          disabled={uploadingStage === stageName}
+                        />
+                        <button
+                          className="border px-3 py-2 rounded-xl bg-white disabled:opacity-50"
+                          disabled={uploadingStage === stageName || !fileByStage[stageName]}
+                          onClick={() => uploadEvidence(stageName)}
+                        >
+                          {uploadingStage === stageName ? "Subiendo..." : "Subir evidencia"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Notas (en revision_calidad es útil; igual lo dejamos para todas) */}
+                  <div className="mt-3 grid gap-2">
+                    <div className="text-sm font-semibold">Notas</div>
+                    <textarea
+                      className="border rounded-xl p-3 w-full min-h-[90px]"
+                      value={notesByStage[stageName] ?? ""}
+                      onChange={(e) => setNotesByStage((prev) => ({ ...prev, [stageName]: e.target.value }))}
+                      placeholder="Notas de esta etapa..."
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        className="border px-3 py-2 rounded-xl bg-white disabled:opacity-50"
+                        disabled={saving}
+                        onClick={() => saveNotes(stageName)}
+                      >
+                        Guardar notas
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Ayuda: permisos */}
+                  <div className="mt-3 text-xs text-gray-500">
+                    * El sistema valida permisos por BD. Si no tienes permiso, aunque veas el botón, la aprobación será rechazada.
+                  </div>
+                </div>
+              );
+            })}
+
+            {visibleStages.length === 0 && (
+              <div className="text-sm text-gray-500">No hay etapas visibles para tu usuario.</div>
+            )}
+          </div>
         </div>
       </div>
     </main>
   );
 }
-
