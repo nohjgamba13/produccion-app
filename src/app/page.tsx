@@ -124,6 +124,7 @@ export default function HomePage() {
       const r = (pres.data?.role ?? null) as Role;
       setRole(r);
 
+      // Solo los operarios necesitan módulo/etapa asignada
       if (r === "operator" || r === "operador") {
         const st = await supabase.rpc("user_stage", { uid: u.id });
         setMyStage((st.data ?? null) as string | null);
@@ -156,7 +157,8 @@ export default function HomePage() {
 
     let ord = (ordRes.data ?? []) as OrderRow[];
 
-    // Operario: solo ve órdenes cuya etapa actual coincide con su módulo
+    // ✅ FILTRO SOLO PARA OPERARIOS
+    // Admin y Supervisor siempre ven TODO.
     if (r === "operator" || r === "operador") {
       const stg = await supabase.rpc("user_stage", { uid });
       const stage = (stg.data ?? null) as string | null;
@@ -165,7 +167,7 @@ export default function HomePage() {
       ord = ord.filter((o) => (o.current_stage ?? "") === (stage ?? ""));
     }
 
-    // Orden por urgencia (vencidas primero) y más antiguo primero
+    // Orden por urgencia y por antigüedad
     ord.sort((a, b) => {
       const ka = urgencyKey(a);
       const kb = urgencyKey(b);
@@ -234,6 +236,9 @@ export default function HomePage() {
                   </>
                 )}
               </div>
+              {(role === "admin" || role === "supervisor") && (
+                <div className="text-xs text-gray-500 mt-1">Como {role}, estás viendo todos los módulos.</div>
+              )}
             </div>
 
             <div className="flex gap-2 flex-wrap">
@@ -246,9 +251,14 @@ export default function HomePage() {
               </button>
 
               {role === "admin" && (
-                <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/admin/users")}>
-                  Usuarios/Roles
-                </button>
+                <>
+                  <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/admin/users")}>
+                    Usuarios/Roles
+                  </button>
+                  <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/admin/stages")}>
+                    Módulos
+                  </button>
+                </>
               )}
 
               {canCreate && (
@@ -320,7 +330,7 @@ export default function HomePage() {
 
           {orders.length === 0 && (
             <div className="text-sm text-gray-500 bg-white border rounded-2xl p-4">
-              No hay órdenes para mostrar en tu módulo.
+              No hay órdenes para mostrar.
             </div>
           )}
         </div>
