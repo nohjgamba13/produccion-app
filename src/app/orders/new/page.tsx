@@ -52,6 +52,10 @@ export default function NewOrderPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [settings, setSettings] = useState<ChannelSetting[]>([]);
 
+  // ✅ filtros catálogo
+  const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
+  const [searchTerm, setSearchTerm] = useState<string>("");
+
   useEffect(() => {
     init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -129,15 +133,46 @@ export default function NewOrderPage() {
     return m;
   }, [products]);
 
+  // ✅ opciones de categorías
+  const categoryOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of products) {
+      const cat = (p.category ?? "Sin categoría").trim() || "Sin categoría";
+      set.add(cat);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [products]);
+
+  // ✅ aplicar filtros (categoría + búsqueda)
+  const filteredProducts = useMemo(() => {
+    const q = searchTerm.trim().toLowerCase();
+
+    return products.filter((p) => {
+      const cat = (p.category ?? "Sin categoría").trim() || "Sin categoría";
+
+      const okCategory = selectedCategory === "ALL" ? true : cat === selectedCategory;
+
+      const name = (p.name ?? "").toLowerCase();
+      const sku = (p.sku ?? "").toLowerCase();
+      const desc = (p.description ?? "").toLowerCase();
+
+      const okSearch =
+        q.length === 0 ? true : name.includes(q) || sku.includes(q) || desc.includes(q);
+
+      return okCategory && okSearch;
+    });
+  }, [products, selectedCategory, searchTerm]);
+
+  // ✅ construir catálogo agrupado desde filteredProducts
   const productsByCategory = useMemo(() => {
     const m: Record<string, Product[]> = {};
-    for (const p of products) {
+    for (const p of filteredProducts) {
       const cat = (p.category ?? "Sin categoría").trim() || "Sin categoría";
       if (!m[cat]) m[cat] = [];
       m[cat].push(p);
     }
     return m;
-  }, [products]);
+  }, [filteredProducts]);
 
   const addItem = (pid: string) => {
     setItems((prev) => {
@@ -193,12 +228,7 @@ export default function NewOrderPage() {
         due_date: dueDate ? dueDate : null,
       };
 
-      const oRes = await supabase
-        .from("ordenes_de_produccion")
-        .insert(orderPayload)
-        .select("id")
-        .single();
-
+      const oRes = await supabase.from("ordenes_de_produccion").insert(orderPayload).select("id").single();
       if (oRes.error) throw oRes.error;
 
       const orderId = oRes.data.id as string;
@@ -285,9 +315,6 @@ export default function NewOrderPage() {
                 onChange={(e) => {
                   const val = e.target.value as SaleChannel;
                   setSaleChannel(val);
-
-                  // Si cambia a no-institucional, permitimos limpiar dueDate para que aplique automático
-                  // Si cambia a institucional, dejamos lo que tenga pero será obligatorio antes de crear
                 }}
               >
                 <option value="web">{CHANNEL_LABEL.web}</option>
@@ -328,10 +355,7 @@ export default function NewOrderPage() {
             </div>
 
             <div className="flex gap-2">
-              <button
-                className="border px-3 py-2 rounded-xl bg-white"
-                onClick={() => (window.location.href = "/")}
-              >
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/")}>
                 Cancelar
               </button>
 
@@ -346,47 +370,98 @@ export default function NewOrderPage() {
           </div>
         </div>
 
-        {/* Catálogo por categorías */}
+        {/* ✅ Filtros de catálogo */}
         <div className="mt-4 bg-white border rounded-2xl p-4">
           <div className="text-xl font-bold">Catálogo</div>
           <div className="text-sm text-gray-600">
             Selecciona productos (puedes escoger varios de distintas categorías)
           </div>
 
-          {Object.keys(productsByCategory).map((cat) => (
-            <div key={cat} className="mt-4">
-              <div className="font-semibold mb-2">{cat}</div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {productsByCategory[cat].map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => addItem(p.id)}
-                    className="text-left border rounded-2xl p-3 bg-white hover:bg-gray-50"
-                  >
-                    <div className="flex gap-3">
-                      {p.image_path ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={p.image_path}
-                          alt="Producto"
-                          className="w-16 h-16 rounded-xl object-cover border"
-                        />
-                      ) : (
-                        <div className="w-16 h-16 rounded-xl border bg-gray-100" />
-                      )}
-
-                      <div className="min-w-0">
-                        <div className="font-bold truncate">{p.name ?? "-"}</div>
-                        <div className="text-xs text-gray-600 truncate">SKU: {p.sku ?? "-"}</div>
-                        <div className="text-xs text-gray-500 line-clamp-2">{p.description ?? ""}</div>
-                      </div>
-                    </div>
-                    <div className="mt-2 text-xs text-gray-600">➕ Agregar</div>
-                  </button>
-                ))}
-              </div>
+          <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="text-sm text-gray-600">Buscar</label>
+              <input
+                className="w-full border rounded-xl px-3 py-2 bg-white"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Buscar por nombre, SKU o descripción..."
+              />
             </div>
-          ))}
+
+            <div>
+              <label className="text-sm text-gray-600">Categoría</label>
+              <select
+                className="w-full border rounded-xl px-3 py-2 bg-white"
+                value={selectedCategory}
+                onChange={(e) => setSelectedCategory(e.target.value)}
+              >
+                <option value="ALL">Todas</option>
+                {categoryOptions.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-end">
+              <button
+                className="w-full border px-3 py-2 rounded-xl bg-white hover:bg-gray-50"
+                onClick={() => {
+                  setSelectedCategory("ALL");
+                  setSearchTerm("");
+                }}
+              >
+                Limpiar filtros
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-3 text-xs text-gray-500">
+            Mostrando <b>{filteredProducts.length}</b> productos
+          </div>
+
+          {/* Catálogo por categorías (pero filtrado) */}
+          {Object.keys(productsByCategory).length === 0 ? (
+            <div className="text-sm text-gray-500 mt-3">
+              No hay productos para los filtros seleccionados.
+            </div>
+          ) : (
+            Object.keys(productsByCategory).map((cat) => (
+              <div key={cat} className="mt-4">
+                <div className="font-semibold mb-2">{cat}</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {productsByCategory[cat].map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => addItem(p.id)}
+                      className="text-left border rounded-2xl p-3 bg-white hover:bg-gray-50"
+                    >
+                      <div className="flex gap-3">
+                        {p.image_path ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={p.image_path}
+                            alt="Producto"
+                            className="w-16 h-16 rounded-xl object-cover border"
+                          />
+                        ) : (
+                          <div className="w-16 h-16 rounded-xl border bg-gray-100" />
+                        )}
+
+                        <div className="min-w-0">
+                          <div className="font-bold truncate">{p.name ?? "-"}</div>
+                          <div className="text-xs text-gray-600 truncate">SKU: {p.sku ?? "-"}</div>
+                          <div className="text-xs text-gray-500 line-clamp-2">{p.description ?? ""}</div>
+                        </div>
+                      </div>
+                      <div className="mt-2 text-xs text-gray-600">➕ Agregar</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
         </div>
 
         {/* Items seleccionados */}
@@ -429,10 +504,7 @@ export default function NewOrderPage() {
                         value={it.qty}
                         onChange={(e) => changeQty(it.product_id, Number(e.target.value))}
                       />
-                      <button
-                        className="border px-3 py-2 rounded-xl bg-white"
-                        onClick={() => removeItem(it.product_id)}
-                      >
+                      <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => removeItem(it.product_id)}>
                         Quitar
                       </button>
                     </div>
