@@ -14,6 +14,7 @@ import {
   Shield,
   Briefcase,
   User2,
+  ClipboardCheck,
 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
@@ -26,7 +27,6 @@ function roleLabel(role: Role) {
   return "Sin rol";
 }
 
-// Estilo B (moderno): badges con colores vivos pero elegantes
 function roleBadgeClass(role: Role) {
   if (role === "admin") return "bg-violet-50 text-violet-700 border-violet-200";
   if (role === "supervisor") return "bg-sky-50 text-sky-700 border-sky-200";
@@ -57,9 +57,7 @@ function NavLink({
       href={href}
       className={[
         "inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold transition",
-        active
-          ? "bg-blue-600 text-white shadow-sm"
-          : "text-gray-700 hover:bg-gray-100 hover:text-gray-900",
+        active ? "bg-blue-600 text-white shadow-sm" : "text-gray-700 hover:bg-gray-100 hover:text-gray-900",
       ].join(" ")}
     >
       <span className="shrink-0">{icon}</span>
@@ -79,6 +77,7 @@ export default function TopNav() {
   const isAdmin = role === "admin";
   const isSupervisor = role === "supervisor";
   const canCreateOrder = isAdmin || isSupervisor;
+  const canViewCompleted = isAdmin || isSupervisor;
 
   useEffect(() => {
     let alive = true;
@@ -100,11 +99,7 @@ export default function TopNav() {
 
         setUserEmail(user.email ?? "");
 
-        const prof = await supabase
-          .from("profiles")
-          .select("role")
-          .eq("user_id", user.id)
-          .single();
+        const prof = await supabase.from("profiles").select("role").eq("user_id", user.id).single();
 
         if (!alive) return;
 
@@ -134,6 +129,12 @@ export default function TopNav() {
         show: canCreateOrder,
       },
       {
+        href: "/completed-orders",
+        label: "Órdenes completadas",
+        icon: <ClipboardCheck size={18} />,
+        show: canViewCompleted,
+      },
+      {
         href: "/catalog",
         label: "Catálogo",
         icon: <Package size={18} />,
@@ -152,7 +153,7 @@ export default function TopNav() {
         show: isAdmin,
       },
     ];
-  }, [canCreateOrder, isAdmin]);
+  }, [canCreateOrder, canViewCompleted, isAdmin]);
 
   const logout = async () => {
     await supabase.auth.signOut();
@@ -164,16 +165,13 @@ export default function TopNav() {
 
   return (
     <div className="sticky top-0 z-50">
-      {/* Barra superior moderna (degradado corporativo B) */}
       <div className="h-1 w-full bg-gradient-to-r from-blue-700 via-sky-500 to-violet-600" />
 
       <header className="w-full bg-white/90 backdrop-blur border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 md:px-8">
           <div className="h-20 flex items-center justify-between gap-4">
-            {/* Izquierda: Logo + Marca */}
             <div className="flex items-center gap-4 min-w-0">
               <Link href="/" className="flex items-center gap-3">
-                {/* ✅ Logo 50% más pequeño */}
                 <Image
                   src="/logo-empresa.png"
                   alt="Logo Empresa"
@@ -188,31 +186,21 @@ export default function TopNav() {
                     <Briefcase size={18} className="text-blue-600" />
                     <span>Sistema de Producción</span>
                   </div>
-                  <div className="text-xs text-gray-500">
-                    Órdenes • Etapas • Evidencias
-                  </div>
+                  <div className="text-xs text-gray-500">Órdenes • Etapas • Evidencias</div>
                 </div>
               </Link>
             </div>
 
-            {/* Centro: Menú Desktop */}
             {showNav && (
               <nav className="hidden lg:flex items-center gap-1">
                 {items
                   .filter((x) => x.show)
                   .map((l) => (
-                    <NavLink
-                      key={l.href}
-                      href={l.href}
-                      label={l.label}
-                      icon={l.icon}
-                      active={pathname === l.href}
-                    />
+                    <NavLink key={l.href} href={l.href} label={l.label} icon={l.icon} active={pathname === l.href} />
                   ))}
               </nav>
             )}
 
-            {/* Derecha: Usuario + Rol + Logout */}
             <div className="flex items-center gap-3">
               {!showNav ? null : (
                 <>
@@ -220,64 +208,37 @@ export default function TopNav() {
                     <div className="h-9 w-9 rounded-full bg-gradient-to-br from-blue-600 to-violet-600 text-white shadow-sm flex items-center justify-center">
                       <User2 size={18} />
                     </div>
+
                     <div>
-                      <div className="text-sm font-medium text-gray-900">
-                        {loading ? "Cargando..." : userEmail || "—"}
-                      </div>
-                      <div className="text-xs text-gray-500 flex items-center gap-1 justify-end">
-                        <Shield size={14} className="text-gray-500" />
-                        <span>Acceso seguro</span>
+                      <div className="text-sm font-semibold text-gray-900 truncate max-w-[220px]">{loading ? "Cargando..." : userEmail || "Sin sesión"}</div>
+                      <div className="flex items-center justify-end gap-2 mt-0.5">
+                        <span className={["inline-flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-full border", roleBadgeClass(role)].join(" ")}>
+                          <Shield size={12} />
+                          {roleLabel(role)}
+                        </span>
                       </div>
                     </div>
                   </div>
 
-                  <span
-                    className={[
-                      "hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-xs font-semibold",
-                      roleBadgeClass(role),
-                    ].join(" ")}
-                    title="Rol"
-                  >
-                    <Shield size={14} />
-                    {roleLabel(role)}
-                  </span>
-
                   <button
                     onClick={logout}
-                    className="inline-flex items-center gap-2 justify-center px-4 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition shadow-sm"
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-200 text-sm font-semibold text-gray-700 hover:bg-gray-50"
                   >
-                    <LogOut size={18} />
-                    <span className="hidden sm:inline">Cerrar sesión</span>
+                    <LogOut size={16} />
+                    <span className="hidden sm:inline">Salir</span>
                   </button>
                 </>
               )}
             </div>
           </div>
 
-          {/* Menú Mobile/Tablet */}
           {showNav && (
-            <div className="lg:hidden pb-3 -mt-1 flex flex-wrap gap-2">
+            <div className="lg:hidden pb-3 flex gap-2 overflow-x-auto">
               {items
                 .filter((x) => x.show)
                 .map((l) => (
-                  <NavLink
-                    key={l.href}
-                    href={l.href}
-                    label={l.label}
-                    icon={l.icon}
-                    active={pathname === l.href}
-                  />
+                  <NavLink key={l.href} href={l.href} label={l.label} icon={l.icon} active={pathname === l.href} />
                 ))}
-
-              <span
-                className={[
-                  "sm:hidden inline-flex items-center gap-1 px-2.5 py-1 rounded-full border text-xs font-semibold",
-                  roleBadgeClass(role),
-                ].join(" ")}
-              >
-                <Shield size={14} />
-                {roleLabel(role)}
-              </span>
             </div>
           )}
         </div>
