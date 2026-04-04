@@ -101,11 +101,29 @@ export default function HomePage() {
 
   const isOperator = role === "operator" || role === "operador";
   const canCreate = role === "admin" || role === "supervisor";
+  const canSeeCompleted = role === "admin" || role === "supervisor";
 
   useEffect(() => {
-    init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void init();
   }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const reload = () => {
+      void loadData(role, user?.id);
+    };
+
+    const channel = supabase
+      .channel("main-board-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: ORDERS_TABLE }, reload)
+      .on("postgres_changes", { event: "*", schema: "public", table: ITEMS_TABLE }, reload)
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [user, role]);
 
   const init = async () => {
     setLoading(true);
@@ -124,7 +142,6 @@ export default function HomePage() {
       const r = (pres.data?.role ?? null) as Role;
       setRole(r);
 
-      // Solo los operarios necesitan módulo/etapa asignada
       if (r === "operator" || r === "operador") {
         const st = await supabase.rpc("user_stage", { uid: u.id });
         setMyStage((st.data ?? null) as string | null);
@@ -146,6 +163,7 @@ export default function HomePage() {
     const ordRes = await supabase
       .from(ORDERS_TABLE)
       .select("id, display_code_manual, order_type, status, current_stage, client_name, due_date, created_at, quantity")
+      .neq("status", "completed")
       .limit(500);
 
     if (ordRes.error) {
@@ -155,19 +173,15 @@ export default function HomePage() {
       return;
     }
 
-    let ord = (ordRes.data ?? []) as OrderRow[];
+    let ord = ((ordRes.data ?? []) as OrderRow[]).filter((o) => String(o.status ?? "").toLowerCase() !== "completed");
 
-    // ✅ FILTRO SOLO PARA OPERARIOS
-    // Admin y Supervisor siempre ven TODO.
     if (r === "operator" || r === "operador") {
       const stg = await supabase.rpc("user_stage", { uid });
       const stage = (stg.data ?? null) as string | null;
       setMyStage(stage);
-
       ord = ord.filter((o) => (o.current_stage ?? "") === (stage ?? ""));
     }
 
-    // Orden por urgencia y por antigüedad
     ord.sort((a, b) => {
       const ka = urgencyKey(a);
       const kb = urgencyKey(b);
@@ -231,24 +245,29 @@ export default function HomePage() {
                 Usuario: <b>{user?.email ?? "-"}</b> — Rol: <b>{role ?? "sin rol"}</b>
                 {isOperator && (
                   <>
-                    {" "}
-                    — Módulo: <b>{myStageLabel}</b>
+                    {" "}— Módulo: <b>{myStageLabel}</b>
                   </>
                 )}
               </div>
               {(role === "admin" || role === "supervisor") && (
-                <div className="text-xs text-gray-500 mt-1">Como {role}, estás viendo todos los módulos.</div>
+                <div className="text-xs text-gray-500 mt-1">Como {role}, estás viendo todos los módulos activos. Las completadas están en su apartado.</div>
               )}
             </div>
 
             <div className="flex gap-2 flex-wrap">
-              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => loadData(role, user?.id)}>
+              <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => void loadData(role, user?.id)}>
                 Recargar
               </button>
 
               <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/catalog")}>
                 Catálogo
               </button>
+
+              {canSeeCompleted && (
+                <button className="border px-3 py-2 rounded-xl bg-white" onClick={() => (window.location.href = "/completed-orders")}>
+                  Órdenes completadas
+                </button>
+              )}
 
               {role === "admin" && (
                 <>
@@ -283,7 +302,7 @@ export default function HomePage() {
             const first = its[0];
             const restCount = Math.max(0, its.length - 1);
 
-            const stageLabel = isStageKey(o.current_stage) ? STAGE_LABEL[o.current_stage] : (o.current_stage ?? "-");
+            const currentStageLabel = isStageKey(o.current_stage) ? STAGE_LABEL[o.current_stage] : (o.current_stage ?? "-");
 
             return (
               <button
@@ -295,7 +314,7 @@ export default function HomePage() {
                   <div className="min-w-0">
                     <div className="font-bold truncate">{o.display_code_manual ?? "(sin consecutivo)"}</div>
                     <div className="text-sm text-gray-600 truncate">
-                      Cliente: <b>{o.client_name ?? "-"}</b> · Etapa: <b>{stageLabel}</b>
+                      Cliente: <b>{o.client_name ?? "-"}</b> · Etapa: <b>{currentStageLabel}</b>
                     </div>
                   </div>
 
@@ -330,7 +349,7 @@ export default function HomePage() {
 
           {orders.length === 0 && (
             <div className="text-sm text-gray-500 bg-white border rounded-2xl p-4">
-              No hay órdenes para mostrar.
+              No hay órdenes activas para mostrar.
             </div>
           )}
         </div>
