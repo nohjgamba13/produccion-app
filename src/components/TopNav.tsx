@@ -17,6 +17,7 @@ import {
   Users,
   CheckCircle2,
   Store,
+  Building2,
 } from "lucide-react";
 import { supabase } from "../lib/supabaseClient";
 
@@ -213,6 +214,12 @@ export default function TopNav() {
 
   const adminItems = useMemo<NavItem[]>(
     () => [
+      {
+        href: "/admin/tiendas",
+        label: "Tiendas",
+        icon: <Building2 size={18} />,
+        show: isAdmin,
+      },
       {
         href: "/admin/users",
         label: "Usuarios",
