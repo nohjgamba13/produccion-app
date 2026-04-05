@@ -2,6 +2,21 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  PieChart,
+  Pie,
+  Cell,
+  LineChart,
+  Line,
+  Legend,
+} from "recharts";
 import GerenciaFilters from "../../components/gerencia/GerenciaFilters";
 import ExportButtons from "../../components/gerencia/ExportButtons";
 import MetricCard from "../../components/gerencia/MetricCard";
@@ -31,6 +46,37 @@ import {
   withinRange,
 } from "../../lib/gerencia";
 import { supabase } from "../../lib/supabaseClient";
+
+const CHART_COLORS = [
+  "#2563eb",
+  "#7c3aed",
+  "#16a34a",
+  "#f59e0b",
+  "#ef4444",
+  "#06b6d4",
+  "#ec4899",
+  "#64748b",
+];
+
+function ChartCard({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="bg-white border rounded-2xl p-4 shadow-sm">
+      <div className="mb-3">
+        <div className="text-lg font-semibold">{title}</div>
+        {subtitle ? <div className="text-sm text-gray-500">{subtitle}</div> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
 
 export default function GerenciaPage() {
   const currentRange = getCurrentMonthRange();
@@ -134,27 +180,27 @@ export default function GerenciaPage() {
   const prodFiltered = useMemo(() => {
     return prodOrders
       .filter((o) => withinRange(o.created_at, range.from, range.to))
-      .filter((o) => saleChannel === "__all__" ? true : o.sale_channel === saleChannel);
+      .filter((o) => (saleChannel === "__all__" ? true : o.sale_channel === saleChannel));
   }, [prodOrders, range, saleChannel]);
 
   const prodPrevious = useMemo(() => {
     return prodOrders
       .filter((o) => withinRange(o.created_at, previousRange.from, previousRange.to))
-      .filter((o) => saleChannel === "__all__" ? true : o.sale_channel === saleChannel);
+      .filter((o) => (saleChannel === "__all__" ? true : o.sale_channel === saleChannel));
   }, [prodOrders, previousRange, saleChannel]);
 
   const storeFiltered = useMemo(() => {
     return storeOrders
       .filter((o) => withinRange(o.created_at, range.from, range.to))
-      .filter((o) => pedidoStatus === "__all__" ? true : o.status === pedidoStatus)
-      .filter((o) => storeId === "__all__" ? true : o.tienda_id === storeId);
+      .filter((o) => (pedidoStatus === "__all__" ? true : o.status === pedidoStatus))
+      .filter((o) => (storeId === "__all__" ? true : o.tienda_id === storeId));
   }, [storeOrders, range, pedidoStatus, storeId]);
 
   const storePrevious = useMemo(() => {
     return storeOrders
       .filter((o) => withinRange(o.created_at, previousRange.from, previousRange.to))
-      .filter((o) => pedidoStatus === "__all__" ? true : o.status === pedidoStatus)
-      .filter((o) => storeId === "__all__" ? true : o.tienda_id === storeId);
+      .filter((o) => (pedidoStatus === "__all__" ? true : o.status === pedidoStatus))
+      .filter((o) => (storeId === "__all__" ? true : o.tienda_id === storeId));
   }, [storeOrders, previousRange, pedidoStatus, storeId]);
 
   const storesList = useMemo(
@@ -195,12 +241,20 @@ export default function GerenciaPage() {
 
     const prodComplianceBase = prodFiltered.filter((o) => !!o.due_date).length;
     const prodCompliance = prodComplianceBase
-      ? Math.round(((prodFiltered.filter((o) => isProdCompleted(o.status)).length) / prodComplianceBase) * 100)
+      ? Math.round(
+          (prodFiltered.filter((o) => isProdCompleted(o.status)).length / prodComplianceBase) * 100
+        )
       : 0;
 
     const storeApprovalBase = storeFiltered.length;
     const storeApproval = storeApprovalBase
-      ? Math.round(((storeFiltered.filter((o) => safeLower(o.status) === "approved" || safeLower(o.status) === "delivered").length) / storeApprovalBase) * 100)
+      ? Math.round(
+          (storeFiltered.filter(
+            (o) => safeLower(o.status) === "approved" || safeLower(o.status) === "delivered"
+          ).length /
+            storeApprovalBase) *
+            100
+        )
       : 0;
 
     return {
@@ -310,6 +364,41 @@ export default function GerenciaPage() {
 
     return [...prod, ...tienda].sort((a, b) => a.fecha_entrega.localeCompare(b.fecha_entrega));
   }, [prodOrders, storeOrders, stores, todayISO]);
+
+  const productionTrend = useMemo(() => {
+    const map: Record<string, { fecha: string; produccion: number; pedidosTienda: number }> = {};
+
+    for (const o of prodFiltered) {
+      const key = (o.created_at ?? "").slice(0, 10);
+      if (!key) continue;
+      if (!map[key]) map[key] = { fecha: key, produccion: 0, pedidosTienda: 0 };
+      map[key].produccion += 1;
+    }
+
+    for (const o of storeFiltered) {
+      const key = (o.created_at ?? "").slice(0, 10);
+      if (!key) continue;
+      if (!map[key]) map[key] = { fecha: key, produccion: 0, pedidosTienda: 0 };
+      map[key].pedidosTienda += 1;
+    }
+
+    return Object.values(map).sort((a, b) => a.fecha.localeCompare(b.fecha));
+  }, [prodFiltered, storeFiltered]);
+
+  const pieStoreStatus = useMemo(
+    () => storeByStatus.map((row, index) => ({ ...row, fill: CHART_COLORS[index % CHART_COLORS.length] })),
+    [storeByStatus]
+  );
+
+  const barStageData = useMemo(
+    () => prodByStage.map((row, index) => ({ ...row, fill: CHART_COLORS[index % CHART_COLORS.length] })),
+    [prodByStage]
+  );
+
+  const barChannelData = useMemo(
+    () => prodByChannel.map((row, index) => ({ ...row, fill: CHART_COLORS[index % CHART_COLORS.length] })),
+    [prodByChannel]
+  );
 
   if (loading) return <div className="p-6">Cargando panel gerencial...</div>;
 
@@ -425,131 +514,103 @@ export default function GerenciaPage() {
         {!errorMsg && (
           <>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-              <MetricCard
-                label="Órdenes producción activas"
-                value={metrics.prodActive}
-                trend={metrics.prodActiveTrend}
-              />
-              <MetricCard
-                label="Órdenes producción completadas"
-                value={metrics.prodCompleted}
-                trend={metrics.prodCompletedTrend}
-              />
-              <MetricCard
-                label="Pedidos tienda activos"
-                value={metrics.storeActive}
-                trend={metrics.storeActiveTrend}
-              />
-              <MetricCard
-                label="Pedidos tienda cerrados"
-                value={metrics.storeClosed}
-                trend={metrics.storeClosedTrend}
-              />
-              <MetricCard
-                label="Producción próxima a entregar"
-                value={metrics.prodUpcoming7}
-                hint="Próximos 7 días"
-              />
-              <MetricCard
-                label="Pedidos tienda próximos"
-                value={metrics.storeUpcoming7}
-                hint="Próximos 7 días"
-              />
-              <MetricCard
-                label="Órdenes vencidas producción"
-                value={metrics.prodOverdue}
-              />
-              <MetricCard
-                label="Pedidos tienda vencidos"
-                value={metrics.storeOverdue}
-              />
-              <MetricCard
-                label="Unidades producción"
-                value={metrics.units}
-                hint="Dentro del rango"
-              />
-              <MetricCard
-                label="Promedio unidades por orden"
-                value={metrics.avgUnits}
-              />
-              <MetricCard
-                label="Cumplimiento producción"
-                value={`${metrics.prodCompliance}%`}
-              />
-              <MetricCard
-                label="Aprobación pedidos tienda"
-                value={`${metrics.storeApproval}%`}
-              />
+              <MetricCard label="Órdenes producción activas" value={metrics.prodActive} trend={metrics.prodActiveTrend} />
+              <MetricCard label="Órdenes producción completadas" value={metrics.prodCompleted} trend={metrics.prodCompletedTrend} />
+              <MetricCard label="Pedidos tienda activos" value={metrics.storeActive} trend={metrics.storeActiveTrend} />
+              <MetricCard label="Pedidos tienda cerrados" value={metrics.storeClosed} trend={metrics.storeClosedTrend} />
+              <MetricCard label="Producción próxima a entregar" value={metrics.prodUpcoming7} hint="Próximos 7 días" />
+              <MetricCard label="Pedidos tienda próximos" value={metrics.storeUpcoming7} hint="Próximos 7 días" />
+              <MetricCard label="Órdenes vencidas producción" value={metrics.prodOverdue} />
+              <MetricCard label="Pedidos tienda vencidos" value={metrics.storeOverdue} />
+              <MetricCard label="Unidades producción" value={metrics.units} hint="Dentro del rango" />
+              <MetricCard label="Promedio unidades por orden" value={metrics.avgUnits} />
+              <MetricCard label="Cumplimiento producción" value={`${metrics.prodCompliance}%`} />
+              <MetricCard label="Aprobación pedidos tienda" value={`${metrics.storeApproval}%`} />
             </div>
 
             <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              <SectionCard
-                title="Producción por canal"
-                subtitle="Distribución del rango seleccionado"
-              >
+              <ChartCard title="Producción por canal" subtitle="Gráfica comparativa por canal">
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={barChannelData}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="channel" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Bar dataKey="total" radius={[8, 8, 0, 0]}>
+                        {barChannelData.map((entry, index) => (
+                          <Cell key={`cell-channel-${index}`} fill={entry.fill} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </ChartCard>
+
+              <ChartCard title="Pedidos tienda por estado" subtitle="Participación por estado">
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={pieStoreStatus} dataKey="total" nameKey="name" cx="50%" cy="50%" outerRadius={110} label>
+                        {pieStoreStatus.map((entry, index) => (
+                          <Cell key={`cell-status-${index}`} fill={entry.fill} />
+                        ))}
+                      </Pie>
+                      <Tooltip />
+                      <Legend />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </ChartCard>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <ChartCard title="Producción por etapa" subtitle="Cuellos de botella del rango">
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={barStageData} layout="vertical" margin={{ left: 20 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis type="number" allowDecimals={false} />
+                      <YAxis dataKey="name" type="category" width={110} />
+                      <Tooltip />
+                      <Bar dataKey="total" radius={[0, 8, 8, 0]}>
+                        {barStageData.map((entry, index) => (
+                          <Cell key={`cell-stage-${index}`} fill={entry.fill} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </ChartCard>
+
+              <ChartCard title="Tendencia del rango" subtitle="Producción y pedidos tienda por fecha">
+                <div className="h-80">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={productionTrend}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="fecha" />
+                      <YAxis allowDecimals={false} />
+                      <Tooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="produccion" name="Producción" stroke="#2563eb" strokeWidth={3} dot={{ r: 4 }} />
+                      <Line type="monotone" dataKey="pedidosTienda" name="Pedidos tienda" stroke="#f59e0b" strokeWidth={3} dot={{ r: 4 }} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              </ChartCard>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+              <SectionCard title="Resumen tabular producción" subtitle="Distribución del rango seleccionado">
                 <ProductionSummaryTable rows={prodByChannel} />
               </SectionCard>
 
-              <SectionCard
-                title="Pedidos tienda por estado"
-                subtitle="Distribución del rango seleccionado"
-              >
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-left border-b">
-                        <th className="py-2 pr-3">Estado</th>
-                        <th className="py-2 pr-3">Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {storeByStatus.map((row) => (
-                        <tr key={row.name} className="border-b last:border-0">
-                          <td className="py-2 pr-3">{row.name}</td>
-                          <td className="py-2 pr-3">{row.total}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  {storeByStatus.length === 0 && (
-                    <div className="text-sm text-gray-500 py-4">
-                      No hay datos para este rango.
-                    </div>
-                  )}
-                </div>
-              </SectionCard>
-            </div>
-
-            <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-              <SectionCard
-                title="Producción por etapa"
-                subtitle="Cuellos de botella del rango"
-              >
-                <div className="grid gap-3">
-                  {prodByStage.map((row) => (
-                    <div key={row.name} className="border rounded-xl px-3 py-3 flex items-center justify-between">
-                      <div className="font-medium">{row.name}</div>
-                      <div className="text-sm">{row.total}</div>
-                    </div>
-                  ))}
-                  {prodByStage.length === 0 && (
-                    <div className="text-sm text-gray-500">No hay datos para este rango.</div>
-                  )}
-                </div>
-              </SectionCard>
-
-              <SectionCard
-                title="Top tiendas por pedidos"
-                subtitle="Mayor volumen en el rango"
-              >
+              <SectionCard title="Top tiendas por pedidos" subtitle="Mayor volumen en el rango">
                 <StoreOrdersSummaryTable rows={topStores} />
               </SectionCard>
             </div>
 
-            <SectionCard
-              title="Entregas próximas"
-              subtitle="Producción y pedidos tienda en los próximos 14 días"
-            >
+            <SectionCard title="Entregas próximas" subtitle="Producción y pedidos tienda en los próximos 14 días">
               <UpcomingDeliveriesTable rows={upcomingRows} />
             </SectionCard>
           </>
