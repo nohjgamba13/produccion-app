@@ -7,12 +7,10 @@ export default function LoginPage() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState<string>("");
 
   useEffect(() => {
-    // Si ya está logueado, manda al home
     (async () => {
       const { data } = await supabase.auth.getUser();
       if (data.user) window.location.href = "/";
@@ -31,7 +29,6 @@ export default function LoginPage() {
       });
 
       if (res.error) throw res.error;
-
       window.location.href = "/";
     } catch (e: any) {
       setMsg(e?.message ?? String(e));
@@ -54,13 +51,10 @@ export default function LoginPage() {
 
       if (res.error) throw res.error;
 
-      // En Supabase, dependiendo de tu config, puede pedir confirmación por email.
-      // Si no pides confirmación, quedará logueado directo.
       setMsg(
         "✅ Cuenta creada. Si tu proyecto pide confirmación por correo, revisa tu email. Si no, ya puedes iniciar sesión."
       );
 
-      // Intentar iniciar sesión directo (por si no requiere confirmación)
       const login = await supabase.auth.signInWithPassword({
         email: email.trim(),
         password,
@@ -93,18 +87,26 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="min-h-screen bg-gray-100 p-4 flex items-center justify-center">
-      <div className="w-full max-w-md bg-white border rounded-2xl p-5">
-        <h1 className="text-2xl font-bold">Acceso</h1>
-        <p className="text-sm text-gray-600 mt-1">
-          Inicia sesión o crea una cuenta para usar el sistema.
-        </p>
+    <main className="min-h-screen bg-gradient-to-br from-gray-100 via-white to-gray-200 p-4 flex items-center justify-center">
+      <div className="w-full max-w-md bg-white/95 backdrop-blur border border-gray-200 rounded-3xl p-6 shadow-2xl">
+        <div className="flex flex-col items-center text-center mb-6">
+          <img
+            src="/logo.png"
+            alt="Logo empresa"
+            className="w-36 h-36 object-contain mb-4 drop-shadow-md"
+          />
+          <h1 className="text-2xl font-bold text-gray-900">Sistema de Producción</h1>
+          <p className="text-sm text-gray-600 mt-1">
+            Inicia sesión o crea una cuenta para usar el sistema.
+          </p>
+        </div>
 
-        {/* Tabs */}
-        <div className="mt-4 grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-2">
           <button
-            className={`px-3 py-2 rounded-xl border ${
-              mode === "login" ? "bg-black text-white" : "bg-white"
+            className={`px-3 py-2.5 rounded-xl border transition ${
+              mode === "login"
+                ? "bg-black text-white border-black shadow-sm"
+                : "bg-white hover:bg-gray-50"
             }`}
             onClick={() => {
               setMode("login");
@@ -115,8 +117,10 @@ export default function LoginPage() {
             Iniciar sesión
           </button>
           <button
-            className={`px-3 py-2 rounded-xl border ${
-              mode === "register" ? "bg-black text-white" : "bg-white"
+            className={`px-3 py-2.5 rounded-xl border transition ${
+              mode === "register"
+                ? "bg-black text-white border-black shadow-sm"
+                : "bg-white hover:bg-gray-50"
             }`}
             onClick={() => {
               setMode("register");
@@ -128,9 +132,9 @@ export default function LoginPage() {
           </button>
         </div>
 
-        <div className="mt-4 space-y-3">
+        <div className="mt-5 space-y-3">
           <input
-            className="border p-3 rounded-xl w-full"
+            className="border border-gray-300 p-3 rounded-xl w-full bg-white focus:outline-none focus:ring-2 focus:ring-black/20"
             placeholder="Correo"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
@@ -138,7 +142,7 @@ export default function LoginPage() {
             autoComplete="email"
           />
           <input
-            className="border p-3 rounded-xl w-full"
+            className="border border-gray-300 p-3 rounded-xl w-full bg-white focus:outline-none focus:ring-2 focus:ring-black/20"
             placeholder="Contraseña"
             type="password"
             value={password}
@@ -150,7 +154,7 @@ export default function LoginPage() {
           {mode === "login" ? (
             <>
               <button
-                className="w-full bg-black text-white px-4 py-3 rounded-xl disabled:opacity-50"
+                className="w-full bg-black text-white px-4 py-3 rounded-xl disabled:opacity-50 hover:opacity-90 transition shadow-sm"
                 onClick={handleLogin}
                 disabled={loading}
               >
@@ -158,7 +162,7 @@ export default function LoginPage() {
               </button>
 
               <button
-                className="w-full border px-4 py-3 rounded-xl bg-white disabled:opacity-50"
+                className="w-full border px-4 py-3 rounded-xl bg-white disabled:opacity-50 hover:bg-gray-50 transition"
                 onClick={handleResetPassword}
                 disabled={loading}
               >
@@ -167,7 +171,7 @@ export default function LoginPage() {
             </>
           ) : (
             <button
-              className="w-full bg-black text-white px-4 py-3 rounded-xl disabled:opacity-50"
+              className="w-full bg-black text-white px-4 py-3 rounded-xl disabled:opacity-50 hover:opacity-90 transition shadow-sm"
               onClick={handleRegister}
               disabled={loading}
             >
@@ -176,7 +180,7 @@ export default function LoginPage() {
           )}
 
           {msg && (
-            <div className="text-sm border rounded-xl p-3 bg-gray-50">
+            <div className="text-sm border border-gray-200 rounded-xl p-3 bg-gray-50">
               {msg}
             </div>
           )}
@@ -189,4 +193,3 @@ export default function LoginPage() {
     </main>
   );
 }
-
