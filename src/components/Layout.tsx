@@ -1,0 +1,206 @@
+"use client";
+
+import Image from "next/image";
+import { ReactNode, useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import {
+  LayoutDashboard,
+  PlusCircle,
+  Package,
+  CheckCircle2,
+  ClipboardList,
+  Store,
+  Building2,
+  Users,
+  Layers,
+  LineChart,
+  LogOut,
+} from "lucide-react";
+import { supabase } from "../lib/supabaseClient";
+
+type Role = "admin" | "supervisor" | "operator" | "ventas_tienda" | null;
+
+export default function Layout({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const router = useRouter();
+
+  const [role, setRole] = useState<Role>(null);
+  const [email, setEmail] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      const user = data.user;
+      if (!user) return;
+
+      setEmail(user.email ?? "");
+
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("user_id", user.id)
+        .single();
+
+      setRole((profile?.role ?? null) as Role);
+    })();
+  }, []);
+
+  const isAdmin = role === "admin";
+  const isSupervisor = role === "supervisor";
+  const isVentasTienda = role === "ventas_tienda";
+
+  const logout = async () => {
+    await supabase.auth.signOut();
+    router.push("/login");
+  };
+
+  const Item = ({
+    href,
+    label,
+    icon,
+    show = true,
+  }: {
+    href: string;
+    label: string;
+    icon: React.ReactNode;
+    show?: boolean;
+  }) => {
+    if (!show) return null;
+
+    const active = pathname === href;
+
+    return (
+      <button
+        type="button"
+        onClick={() => router.push(href)}
+        className={`w-full flex items-center gap-3 px-3 py-2 rounded-xl cursor-pointer transition text-left ${
+          active
+            ? "bg-blue-600 text-white"
+            : "text-gray-700 hover:bg-gray-100"
+        }`}
+      >
+        {icon}
+        <span>{label}</span>
+      </button>
+    );
+  };
+
+  return (
+    <div className="flex h-screen bg-gray-100">
+      <div className="w-64 bg-white border-r p-4 flex flex-col justify-between">
+        <div>
+          <div className="flex items-center gap-3 mb-8 pb-4 border-b">
+            <Image
+              src="/logo-empresa.png"
+              alt="Logo"
+              width={50}
+              height={50}
+              className="h-10 w-auto object-contain"
+            />
+            <div>
+              <div className="text-base font-semibold text-gray-900">
+                 3PUNTOS
+              </div>
+              <div className="text-xs text-gray-500">
+                Sistema de producción
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Item
+              href="/"
+              label="Tablero"
+              icon={<LayoutDashboard size={18} />}
+            />
+
+            <Item
+              href="/orders/new"
+              label="Crear orden"
+              icon={<PlusCircle size={18} />}
+              show={isAdmin || isSupervisor}
+            />
+
+            <Item
+              href="/catalog"
+              label="Catálogo"
+              icon={<Package size={18} />}
+            />
+
+            <Item
+              href="/completed-orders"
+              label="Completadas"
+              icon={<CheckCircle2 size={18} />}
+              show={isAdmin || isSupervisor}
+            />
+
+            <Item
+              href="/pedidos-tienda"
+              label="Pedidos tienda"
+              icon={<Store size={18} />}
+              show={isAdmin || isSupervisor || isVentasTienda}
+            />
+
+            {isAdmin && (
+              <>
+                <div className="mt-4 text-xs text-gray-400 px-1">ADMIN</div>
+
+                <Item
+                  href="/admin/orders"
+                  label="Administrar"
+                  icon={<ClipboardList size={18} />}
+                />
+                <Item
+                  href="/admin/tiendas"
+                  label="Tiendas"
+                  icon={<Building2 size={18} />}
+                />
+                <Item
+                  href="/admin/users"
+                  label="Usuarios"
+                  icon={<Users size={18} />}
+                />
+                <Item
+                  href="/admin/stages"
+                  label="Módulos"
+                  icon={<Layers size={18} />}
+                />
+
+                <div className="mt-4 text-xs text-gray-400 px-1">GERENCIA</div>
+
+                <Item
+                  href="/gerencia"
+                  label="Panel gerencial"
+                  icon={<LineChart size={18} />}
+                />
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="pt-4 border-t">
+          <div className="text-sm text-gray-600 truncate">{email}</div>
+          <div className="text-xs text-gray-400 mb-3 capitalize">
+            {role ?? "sin rol"}
+          </div>
+
+          <button
+            onClick={logout}
+            className="w-full bg-gray-900 text-white py-2 rounded-xl flex items-center justify-center gap-2 hover:bg-black transition"
+          >
+            <LogOut size={16} />
+            Salir
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 flex flex-col">
+        <div className="h-14 bg-white border-b flex items-center px-6 font-semibold capitalize">
+          {pathname === "/" ? "tablero" : pathname.replaceAll("/", " / ")}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
