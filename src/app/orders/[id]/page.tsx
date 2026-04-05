@@ -10,7 +10,6 @@ const PROFILES_TABLE = "profiles";
 const ORDERS_TABLE = "ordenes_de_produccion";
 const ITEMS_TABLE = "orden_items";
 const STAGES_TABLE = "etapas_de_produccion";
-
 const EVIDENCES_BUCKET = "evidences";
 
 const STAGES = [
@@ -146,15 +145,12 @@ export default function OrderDetailPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
-
   const [user, setUser] = useState<any>(null);
   const [role, setRole] = useState<Role>(null);
   const [myStage, setMyStage] = useState<string | null>(null);
-
   const [order, setOrder] = useState<OrderRow | null>(null);
   const [items, setItems] = useState<OrderItemRow[]>([]);
   const [stages, setStages] = useState<StageRow[]>([]);
-
   const [canApproveMap, setCanApproveMap] = useState<Record<string, boolean>>({});
   const [uploadingStage, setUploadingStage] = useState<string | null>(null);
   const [fileByStage, setFileByStage] = useState<Record<string, File | null>>({});
@@ -165,7 +161,6 @@ export default function OrderDetailPage() {
 
   useEffect(() => {
     void init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId]);
 
   const init = async () => {
@@ -173,7 +168,6 @@ export default function OrderDetailPage() {
 
     setLoading(true);
     setErrorMsg("");
-
     try {
       const ures = await supabase.auth.getUser();
       const u = ures.data.user ?? null;
@@ -210,12 +204,9 @@ export default function OrderDetailPage() {
 
   const loadAll = async (r?: Role, uid?: string) => {
     setErrorMsg("");
-
     const o = await supabase
       .from(ORDERS_TABLE)
-      .select(
-        "id, display_code_manual, order_type, status, current_stage, client_name, due_date, created_at, quantity"
-      )
+      .select("id, display_code_manual, order_type, status, current_stage, client_name, due_date, created_at, quantity")
       .eq("id", orderId)
       .single();
 
@@ -228,9 +219,7 @@ export default function OrderDetailPage() {
 
     const it = await supabase
       .from(ITEMS_TABLE)
-      .select(
-        "id, order_id, product_id, product_name, product_image_path, category, sku, qty, lead_time_days, created_at"
-      )
+      .select("id, order_id, product_id, product_name, product_image_path, category, sku, qty, lead_time_days, created_at")
       .eq("order_id", orderId)
       .order("category", { ascending: true })
       .order("created_at", { ascending: true });
@@ -337,16 +326,22 @@ export default function OrderDetailPage() {
         .from(STAGES_TABLE)
         .update({ evidence_url: url })
         .eq("order_id", orderId)
-        .eq("stage", stageName);
+        .eq("stage", stageName)
+        .select("order_id, stage, evidence_url");
 
       if (upd.error) {
         await supabase.storage.from(EVIDENCES_BUCKET).remove([filePath]);
         throw upd.error;
       }
 
+      if (!upd.data || upd.data.length === 0) {
+        await supabase.storage.from(EVIDENCES_BUCKET).remove([filePath]);
+        throw new Error("La evidencia se subió al bucket pero no se pudo guardar en la etapa.");
+      }
+
       await loadAll(role, user?.id);
       setFileByStage((prev) => ({ ...prev, [stageName]: null }));
-      alert("✅ Evidencia subida correctamente.");
+      alert("✅ Evidencia guardada correctamente.");
     } catch (e: any) {
       alert("❌ Error subiendo evidencia: " + (e?.message ?? String(e)));
     } finally {
@@ -484,7 +479,6 @@ export default function OrderDetailPage() {
                       {itemsGrouped[cat].map((it) => (
                         <div key={it.id} className="border rounded-2xl overflow-hidden bg-white">
                           {normalizeImageUrl(it.product_image_path) ? (
-                            // eslint-disable-next-line @next/next/no-img-element
                             <img
                               src={normalizeImageUrl(it.product_image_path)}
                               alt={it.product_name}
