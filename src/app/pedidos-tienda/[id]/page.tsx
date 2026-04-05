@@ -38,7 +38,6 @@ function getErrorMessage(error: unknown) {
   if (!error) return "Error desconocido.";
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
-
   if (typeof error === "object") {
     const e = error as {
       message?: string;
@@ -57,8 +56,13 @@ function getErrorMessage(error: unknown) {
       JSON.stringify(error)
     );
   }
-
   return String(error);
+}
+
+function normalizeImageUrl(url: string | null | undefined) {
+  if (!url) return "";
+  if (url.startsWith("http://")) return url.replace("http://", "https://");
+  return url;
 }
 
 function stageLabel(value: string) {
@@ -84,13 +88,11 @@ export default function PedidoTiendaDetailPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
-
   const [role, setRole] = useState<Role>(null);
   const [userId, setUserId] = useState("");
   const [pedido, setPedido] = useState<Pedido | null>(null);
   const [tienda, setTienda] = useState<TiendaInfo | null>(null);
   const [items, setItems] = useState<Item[]>([]);
-
   const [notes, setNotes] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [rejectNote, setRejectNote] = useState("");
@@ -101,9 +103,7 @@ export default function PedidoTiendaDetailPage() {
       setErrorMsg("No se recibió el id del pedido en la ruta.");
       return;
     }
-
     void init();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pedidoId]);
 
   const init = async () => {
@@ -366,7 +366,7 @@ export default function PedidoTiendaDetailPage() {
   }
 
   return (
-    <main className="min-h-screen bg-gray-100 p-4">
+    <main className="min-h-screen bg-gray-100">
       <div className="max-w-6xl mx-auto grid gap-4">
         <div className="bg-white border rounded-2xl p-4">
           <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -403,7 +403,7 @@ export default function PedidoTiendaDetailPage() {
               <label className="text-sm text-gray-600">Fecha de entrega</label>
               <input
                 type="date"
-                className="w-full border rounded-xl px-3 py-2 bg-white"
+                className="w-full border rounded-xl px-3 py-2 bg-white mt-1"
                 value={dueDate}
                 disabled={!canEdit || pedido.status === "delivered"}
                 onChange={(e) => setDueDate(e.target.value)}
@@ -417,7 +417,7 @@ export default function PedidoTiendaDetailPage() {
             <div className="md:col-span-2">
               <label className="text-sm text-gray-600">Notas</label>
               <textarea
-                className="w-full border rounded-xl px-3 py-2 bg-white min-h-[110px]"
+                className="w-full border rounded-xl px-3 py-2 bg-white min-h-[110px] mt-1"
                 value={notes}
                 disabled={!canEdit || pedido.status === "delivered"}
                 onChange={(e) => setNotes(e.target.value)}
@@ -429,7 +429,7 @@ export default function PedidoTiendaDetailPage() {
               <div className="md:col-span-2">
                 <label className="text-sm text-gray-600">Nota de rechazo</label>
                 <textarea
-                  className="w-full border rounded-xl px-3 py-2 bg-white min-h-[90px]"
+                  className="w-full border rounded-xl px-3 py-2 bg-white min-h-[90px] mt-1"
                   value={rejectNote}
                   disabled={!canReview || pedido.status === "delivered"}
                   onChange={(e) => setRejectNote(e.target.value)}
@@ -439,10 +439,10 @@ export default function PedidoTiendaDetailPage() {
             )}
           </div>
 
-          <div className="mt-4 flex gap-2 flex-wrap">
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 xl:flex gap-2">
             {canEdit && pedido.status !== "delivered" && (
               <button
-                className="border px-4 py-2 rounded-xl bg-white disabled:opacity-50"
+                className="border px-4 py-3 rounded-xl bg-white disabled:opacity-50 w-full xl:w-auto"
                 onClick={saveChanges}
                 disabled={saving}
               >
@@ -454,7 +454,7 @@ export default function PedidoTiendaDetailPage() {
               pedido.current_stage === "crear_orden" &&
               pedido.status !== "delivered" && (
                 <button
-                  className="px-4 py-2 rounded-xl bg-black text-white disabled:opacity-50"
+                  className="px-4 py-3 rounded-xl bg-black text-white disabled:opacity-50 w-full xl:w-auto"
                   onClick={moveToReview}
                   disabled={saving}
                 >
@@ -467,7 +467,7 @@ export default function PedidoTiendaDetailPage() {
               pedido.status !== "delivered" && (
                 <>
                   <button
-                    className="px-4 py-2 rounded-xl bg-blue-600 text-white disabled:opacity-50"
+                    className="px-4 py-3 rounded-xl bg-blue-600 text-white disabled:opacity-50 w-full xl:w-auto"
                     onClick={approvePedido}
                     disabled={saving}
                   >
@@ -475,7 +475,7 @@ export default function PedidoTiendaDetailPage() {
                   </button>
 
                   <button
-                    className="px-4 py-2 rounded-xl bg-red-600 text-white disabled:opacity-50"
+                    className="px-4 py-3 rounded-xl bg-red-600 text-white disabled:opacity-50 w-full xl:w-auto"
                     onClick={rejectPedido}
                     disabled={saving}
                   >
@@ -488,7 +488,7 @@ export default function PedidoTiendaDetailPage() {
               pedido.current_stage === "entregar_orden" &&
               pedido.status === "approved" && (
                 <button
-                  className="px-4 py-2 rounded-xl bg-emerald-600 text-white disabled:opacity-50"
+                  className="px-4 py-3 rounded-xl bg-emerald-600 text-white disabled:opacity-50 w-full xl:w-auto"
                   onClick={deliverPedido}
                   disabled={saving}
                 >
@@ -512,30 +512,32 @@ export default function PedidoTiendaDetailPage() {
                   key={it.id}
                   className="border rounded-2xl p-3 flex items-center justify-between gap-3 flex-wrap"
                 >
-                  <div className="flex items-center gap-3">
-                    {it.product_image_path ? (
+                  <div className="flex items-center gap-3 min-w-0">
+                    {normalizeImageUrl(it.product_image_path) ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
-                        src={it.product_image_path}
+                        src={normalizeImageUrl(it.product_image_path)}
                         alt="Producto"
-                        className="w-12 h-12 rounded-xl object-cover border"
+                        className="w-12 h-12 rounded-xl object-cover border shrink-0"
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
                       />
                     ) : (
-                      <div className="w-12 h-12 rounded-xl border bg-gray-100" />
+                      <div className="w-12 h-12 rounded-xl border bg-gray-100 shrink-0" />
                     )}
 
-                    <div>
-                      <div className="font-semibold">{it.product_name ?? "-"}</div>
-                      <div className="text-xs text-gray-600">SKU: {it.sku ?? "-"}</div>
-                      <div className="text-xs text-gray-500">{it.category ?? "-"}</div>
+                    <div className="min-w-0">
+                      <div className="font-semibold truncate">{it.product_name ?? "-"}</div>
+                      <div className="text-xs text-gray-600 truncate">SKU: {it.sku ?? "-"}</div>
+                      <div className="text-xs text-gray-500 truncate">{it.category ?? "-"}</div>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
                     <input
                       type="number"
                       min={1}
-                      className="w-24 border rounded-xl px-3 py-2 bg-white"
+                      className="w-full sm:w-24 border rounded-xl px-3 py-2 bg-white"
                       value={it.qty}
                       disabled={!canEdit || pedido.status === "delivered"}
                       onChange={(e) => updateQty(it.id, Number(e.target.value))}
