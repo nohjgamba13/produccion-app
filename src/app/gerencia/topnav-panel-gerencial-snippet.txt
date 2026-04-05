@@ -1,0 +1,17 @@
+Agrega este botón en tu `src/components/TopNav.tsx` dentro del bloque de administración
+o en el bloque donde prefieras mostrar accesos de admin/supervisor:
+
+{
+  href: "/gerencia",
+  label: "Panel gerencial",
+  icon: <Briefcase size={18} />,
+  show: isAdmin || isSupervisor,
+}
+
+Si tu TopNav está dividido por secciones, la mejor ubicación es junto a:
+- Usuarios
+- Módulos
+- Tiendas
+
+Si quieres evitar tocar mucho el TopNav, también puedes entrar manualmente a:
+`/gerencia`
