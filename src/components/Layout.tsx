@@ -99,16 +99,16 @@ export default function Layout({ children }: { children: ReactNode }) {
           <Image
             src="/logo-empresa.png"
             alt="Logo"
-            width={40}
-            height={40}
-            className="h-10 w-auto object-contain"
+            width={80}
+            height={80}
+            className="h-20 w-auto object-contain"
           />
           <div>
             <div className="text-base font-semibold text-gray-900">
-              Sistema Producción
+              3PUNTOS
             </div>
             <div className="text-xs text-gray-500">
-              Gestión empresarial
+              GESTION DE PRODUCCION
             </div>
           </div>
         </div>
