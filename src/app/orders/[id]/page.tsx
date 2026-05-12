@@ -450,11 +450,42 @@ export default function OrderDetailPage() {
                   <div className="mt-4">
                     {s.evidence_url && (
                       <div className="mb-3">
-                        <img
-                          src={s.evidence_url}
-                          alt="Evidencia"
-                          className="max-w-xs rounded-xl border"
-                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            window.open(
+                              s.evidence_url!,
+                              "_blank"
+                            )
+                          }
+                          className="block"
+                        >
+                          <img
+                            src={s.evidence_url}
+                            alt="Evidencia"
+                            className="
+                              w-full
+                              max-w-md
+                              rounded-2xl
+                              border
+                              shadow-sm
+                              hover:scale-[1.02]
+                              transition
+                              cursor-zoom-in
+                            "
+                          />
+                        </button>
+
+                        <div className="mt-2">
+                          <a
+                            href={s.evidence_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-sm underline text-blue-600"
+                          >
+                            Abrir imagen completa
+                          </a>
+                        </div>
                       </div>
                     )}
 
